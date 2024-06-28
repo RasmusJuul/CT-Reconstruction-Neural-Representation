@@ -30,11 +30,11 @@ def main(args_dict):
 
     projection_shape = np.load(f"{args_dict['general']['data_path']}_projections.npy").shape
     
-    datamodule = CTDataModule(args_dict,num_poses=projection_shape[1])
+    datamodule = CTDataModule(args_dict,num_poses=projection_shape[0])
     
     
     model = MLP(args_dict, 
-                projection_shape=projection_shape[::2]
+                projection_shape=projection_shape,
                ).to(args_dict['training']['device'])
 
     if args_dict['general']['checkpoint_path'] != None:
@@ -58,8 +58,8 @@ def main(args_dict):
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
 
     early_stopping_callback = EarlyStopping(
-        monitor="val/loss",
-        patience=200,
+        monitor="val/loss_total",
+        patience=100,
         verbose=True,
         mode="min",
         strict=False,
@@ -80,8 +80,8 @@ def main(args_dict):
         logger=wandb_logger,
         strategy='ddp',
         num_sanity_val_steps=-1,
-        reload_dataloaders_every_n_epochs=1,
         gradient_clip_val=0.5,
+        check_val_every_n_epoch=5,
     )
 
     
@@ -108,6 +108,8 @@ if __name__=="__main__":
     parser_training.add_argument('--imagefit-mode', action='store_true', help='Enable training of imagefit in addition to detector fitting')
     parser_training.add_argument('--compiled', action='store_true', help='Whether or not to torch compile the model')
     parser_training.add_argument('--noisy-points', action='store_true', help='Whether or not to add noise to the point')
+    parser_training.add_argument('--regularization-weight', type=float, default=1, help='weight used to scale the L1 loss of diffenrence between adjacent points on ray')
+    
     
     parser_model = parser.add_argument_group('Model')
     
@@ -141,6 +143,7 @@ if __name__=="__main__":
             "imagefit_mode":args.imagefit_mode,
             "compiled":args.compiled,
             "noisy_points":args.noisy_points,
+            "regularization_weight":args.regularization_weight,
         },
         "model": { 
             "model_type": args.model_type,

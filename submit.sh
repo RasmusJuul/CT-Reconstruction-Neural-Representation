@@ -24,7 +24,7 @@ source ../envs/renner/bin/activate
 
 # TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name fiber_imagefit_siren --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 100000 --batch-size 50 --num-workers 16 --imagefit-mode
 
-TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name fiber_real --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 100000 --batch-size 10000 --num-workers 16 --compiled --noisy-points --num-points 512 --data-path data/fiber1
+TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name fiber_synthetic --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 100000 --batch-size 10000 --num-workers 16 --compiled --noisy-points --num-points 512 --data-path data/synthetic_fibers_plenoptic/fiber_00 --regularization-weight 1e-1
 
 # TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name fiber_detectorfit_siren --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 100000 --batch-size 10000 --num-workers 16 #--checkpoint-path fiber_imagefit-2024-06-19-2110/MLP-epoch=5536.ckpt
 

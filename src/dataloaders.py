@@ -100,11 +100,7 @@ class CTpoints(torch.utils.data.Dataset):
         data_path = self.args['general']['data_path'] 
         
         positions = np.load(f"{data_path}_positions.npy")
-        projections = np.load(f"{data_path}_projections.npy")
-        projections = np.swapaxes(projections,1,0)
-        projections = np.swapaxes(projections,1,2)
-        projections = 1 - np.exp(-projections/((projections.shape[1]+1)/2)) #In astra projection is just the sum of attenuation along the ray into the pixel, so computing the intensity at the detector using the Beer-Lambert Law
-        self.projections = projections
+        self.projections = np.load(f"{data_path}_projections.npy")
         
         img = torch.tensor(tifffile.imread(f"{args_dict['general']['data_path']}.tif"))
         img -= img.min()
@@ -127,21 +123,26 @@ class CTpoints(torch.utils.data.Dataset):
         object_shape = self.img.shape
         
         self.geometries = [None]*positions.shape[0]
+
+        self.points = torch.zeros((self.projections.shape[0],self.projections.shape[1]*self.projections.shape[2],self.args['training']['num_points']+1,3))
+        self.step_sizes = torch.zeros((*self.projections.shape,3))
         
         for i in tqdm(range(positions.shape[0]),desc='Generating points from rays'):
             self.geometries[i] = Geometry(source_pos[i],detector_pos[i],self.detector_size,detector_pixel_size[i],object_shape)
             self.geometries[i].sample_points(self.args['training']['num_points'])
+            self.points[i] = self.geometries[i].points
+            self.step_sizes[i] = self.geometries[i].step_size
+            
+        self.points = self.points.view(-1,*self.points.shape[-2:])
+        self.step_sizes = self.step_sizes.view(-1,3)
         
-        self.pose_idx = 0
     
     def __len__(self):
         if self.args['training']['imagefit_mode']:
             return self.img.shape[2]
         else:
-            return self.detector_size[0]*self.detector_size[1]
+            return self.detector_size[0]*self.detector_size[1]*self.projections.shape[0]
 
-    def set_pose_idx(self, idx):
-        self.pose_idx = idx
 
     def __getitem__(self, idx):
         if self.args['training']['imagefit_mode']:
@@ -149,11 +150,13 @@ class CTpoints(torch.utils.data.Dataset):
             y = self.img[:,:,idx]
             step_size = None
         else:
-            x = self.geometries[self.pose_idx].points[idx].view(-1,3)
-            y = self.projections[self.pose_idx,:,:].flatten()[idx]
-            step_size = self.geometries[self.pose_idx].step_size.view(-1,3)[idx]
+            x = self.points[idx].view(-1,3)
+            y = self.projections.flatten()[idx]
+            step_size = self.step_sizes[idx]
             
         return x,y,step_size
+
+
 
 class CTDataModule(pl.LightningDataModule):
     def __init__(
@@ -191,7 +194,6 @@ class CTDataModule(pl.LightningDataModule):
         """
         Returns the training data loader.
         """
-        self.dataset.set_pose_idx(self.trainer.current_epoch%self.num_poses)
         return DataLoader(
             self.dataset,
             batch_size=self.args["training"]["batch_size"],
@@ -204,7 +206,6 @@ class CTDataModule(pl.LightningDataModule):
         """
         Returns the validation data loader.
         """
-        self.dataset.set_pose_idx(self.trainer.current_epoch%self.num_poses)
         return DataLoader(
             self.dataset,
             batch_size=self.args["training"]["batch_size"],

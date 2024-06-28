@@ -76,7 +76,7 @@ class MLP(LightningModule):
         self.imagefit_mode = args_dict["training"]["imagefit_mode"]
         self.noisy = args_dict['training']['noisy_points']
 
-        self.l1_regularization_weight = 1
+        self.l1_regularization_weight = args_dict['training']['regularization_weight']
 
         if self.imagefit_mode:
             self.img_shape = tifffile.imread(f"{args_dict['general']['data_path']}.tif").shape
@@ -192,109 +192,87 @@ class MLP(LightningModule):
 
     def validation_step(self, batch, batch_idx):
         points, target, _ = batch
-
-        if self.current_epoch % 5 == 0:
-            if self.imagefit_mode:
-                attenuation_values = self.forward(points)
-                attenuation_values = attenuation_values.view(target.shape)
-                
-                loss = self.loss_fn(attenuation_values,target)
-                
-                self.validation_step_outputs.append(attenuation_values)
-                self.validation_step_gt.append(target)
-            else:
-                attenuation_values = self.forward(points.view(-1,3)).view(points.shape[0],points.shape[1])
-                detector_value_hat = self.compute_projection_values(points.shape[1],attenuation_values)
-
-                smoothness_loss = self.l1_regularization(attenuation_values[:,1:],attenuation_values[:,:-1])
-        
-                loss = self.loss_fn(detector_value_hat, target)
-                
-                self.validation_step_outputs.append(detector_value_hat)
-                self.validation_step_gt.append(target)
-
-                total_loss = loss + self.l1_regularization_weight*smoothness_loss
-    
-            self.log_dict(
-                {
-                    "val/loss": loss,
-                    "val/loss_total":total_loss,
-                    "val/l1_regularization":smoothness_loss,
-                },
-                on_step=False,
-                on_epoch=True,
-            )
-        
-
-    def on_validation_epoch_end(self):
-        if self.current_epoch % 5 == 0:
-            all_preds = torch.cat(self.validation_step_outputs)
-            all_gt = torch.cat(self.validation_step_gt)
-            if self.imagefit_mode:
-                preds = all_preds.view(self.img_shape)
-                gt = all_gt.view(self.img_shape)
-                self.logger.log_image(key="val/reconstruction", images=[preds[self.img_shape[2]//2,:,:], gt[self.img_shape[2]//2,:,:]], caption=["pred", "gt"]) # log projection images
-                psnr = self.psnr(preds.unsqueeze(dim=0).unsqueeze(dim=0),gt.unsqueeze(dim=0).unsqueeze(dim=0))
-                self.log("val/reconstruction",psnr)
-            else:
-                preds = all_preds.view(self.projection_shape)
-                gt = all_gt.view(self.projection_shape)
-        
-                self.logger.log_image(key="val/projection", images=[preds, gt], caption=["pred", "gt"]) # log projection images
-                psnr = self.psnr(preds.unsqueeze(dim=0).unsqueeze(dim=0),gt.unsqueeze(dim=0).unsqueeze(dim=0))
-                self.log("val/psnr_projection",psnr)
-
-                img = self.trainer.val_dataloaders.dataset.img
-                
-                mgrid = torch.stack(torch.meshgrid(torch.linspace(-1, 1, img.shape[0]), torch.linspace(-1, 1, img.shape[1]), torch.linspace(-1, 1, img.shape[2]), indexing='ij'),dim=-1)
-                mgrid = mgrid.view(-1,img.shape[2],3)
-                outputs = torch.zeros((*mgrid.shape[:2],1))
-                for i in range(mgrid.shape[1]):
-                    output = self.forward(mgrid[:,i,:].to(device=self.device))
-                    
-                    outputs[:,i,:] = output.cpu()
-
-                outputs = outputs.view(img.shape)
-                self.log("val/psnr_reconstruction",self.psnr(outputs.unsqueeze(dim=0).unsqueeze(dim=0),img.unsqueeze(dim=0).unsqueeze(dim=0)))
-                self.log("val/loss_reconstruction",self.loss_fn(outputs,img))
-                self.logger.log_image(key="val/reconstruction", images=[outputs[img.shape[2]//2,:,:], img[img.shape[2]//2,:,:],
-                                                                        outputs[:,img.shape[2]//2,:], img[:,img.shape[2]//2,:],
-                                                                        outputs[:,:,img.shape[2]//2], img[:,:,img.shape[2]//2]],
-                                      caption=["pred_xy", "gt_xy",
-                                               "pred_yz", "gt_yz",
-                                               "pred_xz", "gt_xz"])
-                
-            
-            self.validation_step_outputs.clear()  # free memory
-            self.validation_step_gt.clear()  # free memory
-
-    def test_step(self, batch, batch_idx):
-        points, target, _ = batch
-
         if self.imagefit_mode:
             attenuation_values = self.forward(points)
             attenuation_values = attenuation_values.view(target.shape)
             
             loss = self.loss_fn(attenuation_values,target)
+            
+            self.validation_step_outputs.append(attenuation_values)
+            self.validation_step_gt.append(target)
         else:
             attenuation_values = self.forward(points.view(-1,3)).view(points.shape[0],points.shape[1])
             detector_value_hat = self.compute_projection_values(points.shape[1],attenuation_values)
+
+            smoothness_loss = self.l1_regularization(attenuation_values[:,1:],attenuation_values[:,:-1])
     
             loss = self.loss_fn(detector_value_hat, target)
+            
+            self.validation_step_outputs.append(detector_value_hat)
+            self.validation_step_gt.append(target)
+
+            total_loss = loss + self.l1_regularization_weight*smoothness_loss
 
         self.log_dict(
             {
-                "test/loss": loss,
+                "val/loss": loss,
+                "val/loss_total":total_loss,
+                "val/l1_regularization":smoothness_loss,
             },
             on_step=False,
             on_epoch=True,
-            sync_dist=True,
         )
+        
+
+    def on_validation_epoch_end(self):     
+        all_preds = torch.cat(self.validation_step_outputs)
+        all_gt = torch.cat(self.validation_step_gt)
+        if self.imagefit_mode:
+            preds = all_preds.view(self.img_shape)
+            gt = all_gt.view(self.img_shape)
+            self.logger.log_image(key="val/reconstruction", images=[preds[self.img_shape[2]//2,:,:], gt[self.img_shape[2]//2,:,:]], caption=["pred", "gt"]) # log projection images
+            psnr = self.psnr(preds.unsqueeze(dim=0).unsqueeze(dim=0),gt.unsqueeze(dim=0).unsqueeze(dim=0))
+            self.log("val/reconstruction",psnr)
+        else:
+            preds = all_preds.view(self.projection_shape)
+            gt = all_gt.view(self.projection_shape)
+
+            for i in range(self.projection_shape[0]):
+                self.logger.log_image(key="val/projection", images=[preds[i], gt[i]], caption=[f"pred_{i}", f"gt_{i}"]) # log projection images
+            psnr = self.psnr(preds.unsqueeze(dim=0).unsqueeze(dim=0),gt.unsqueeze(dim=0).unsqueeze(dim=0))
+            self.log("val/psnr_projection",psnr)
+
+            img = self.trainer.val_dataloaders.dataset.img
+            
+            mgrid = torch.stack(torch.meshgrid(torch.linspace(-1, 1, img.shape[0]), torch.linspace(-1, 1, img.shape[1]), torch.linspace(-1, 1, img.shape[2]), indexing='ij'),dim=-1)
+            mgrid = mgrid.view(-1,img.shape[2],3)
+            outputs = torch.zeros((*mgrid.shape[:2],1))
+            for i in range(mgrid.shape[1]):
+                output = self.forward(mgrid[:,i,:].to(device=self.device))
+                
+                outputs[:,i,:] = output.cpu()
+
+            outputs = outputs.view(img.shape)
+            self.log("val/psnr_reconstruction",self.psnr(outputs.unsqueeze(dim=0).unsqueeze(dim=0),img.unsqueeze(dim=0).unsqueeze(dim=0)))
+            self.log("val/loss_reconstruction",self.loss_fn(outputs,img))
+            self.logger.log_image(key="val/reconstruction", images=[outputs[img.shape[2]//2,:,:], img[img.shape[2]//2,:,:],
+                                                                    outputs[:,img.shape[2]//2,:], img[:,img.shape[2]//2,:],
+                                                                    outputs[:,:,img.shape[2]//2], img[:,:,img.shape[2]//2]],
+                                  caption=["pred_xy", "gt_xy",
+                                           "pred_yz", "gt_yz",
+                                           "pred_xz", "gt_xz"])
+            
+        
+        self.validation_step_outputs.clear()  # free memory
+        self.validation_step_gt.clear()  # free memory
+
+    def test_step(self, batch, batch_idx):
+        return None
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         # return optimizer
-        lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=100, factor=0.5, cooldown=1)
+        lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=75, factor=0.5, cooldown=1)
         lr_scheduler_config = {
             "scheduler": lr_scheduler,
             "interval": "epoch",

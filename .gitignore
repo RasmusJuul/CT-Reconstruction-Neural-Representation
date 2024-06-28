@@ -14,3 +14,4 @@ checkpoints/
 wandb/
 *.tif
 *.ipynb
+submit.sh
