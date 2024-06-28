@@ -15,7 +15,7 @@ from pytorch_lightning.loggers import WandbLogger
 import wandb
 
 from src import _PATH_DATA, _PATH_MODELS, _PROJECT_ROOT
-from src.data.dataloaders import CTDataModule
+from src.dataloaders import CTDataModule
 from src.models.mlp import MLP
 from src import get_device
 

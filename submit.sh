@@ -1,6 +1,6 @@
 #!/bin/sh
 #BSUB -q gpua100
-#BSUB -J ct-nerf
+#BSUB -J train
 #BSUB -n 16
 #BSUB -R "span[hosts=1]"
 #BSUB -gpu "num=1:mode=exclusive_process"
