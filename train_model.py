@@ -10,7 +10,9 @@ from pytorch_lightning.callbacks import (
     EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
+    StochasticWeightAveraging,
 )
+from lightning.pytorch.profilers import AdvancedProfiler
 from pytorch_lightning.loggers import WandbLogger
 import wandb
 
@@ -59,14 +61,16 @@ def main(args_dict):
 
     early_stopping_callback = EarlyStopping(
         monitor="val/loss_total",
-        patience=40,
+        patience=30,
         verbose=True,
         mode="min",
         strict=False,
         check_on_train_epoch_end=False,
         check_finite = True,
     )
+    swa = StochasticWeightAveraging(swa_lrs=1e-2,swa_epoch_start=100)
 
+    profiler = AdvancedProfiler(dirpath=".", filename="perf_logs")
     
     trainer = Trainer(
         max_epochs=args_dict['training']['num_epochs'],
@@ -75,13 +79,15 @@ def main(args_dict):
         deterministic=False,
         default_root_dir=_PROJECT_ROOT,
         precision="16-mixed",
-        callbacks=[checkpoint_callback, early_stopping_callback,lr_monitor],
-        log_every_n_steps=5,
+        callbacks=[checkpoint_callback, early_stopping_callback,lr_monitor,swa],
+        log_every_n_steps=25,
         logger=wandb_logger,
         strategy='ddp',
         num_sanity_val_steps=-1,
         gradient_clip_val=0.5,
         check_val_every_n_epoch=5,
+        profiler = profiler,
+        detect_anomaly=True,
     )
 
     

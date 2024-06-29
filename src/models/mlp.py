@@ -115,6 +115,7 @@ class MLP(LightningModule):
         self.psnr = tm.image.PeakSignalNoiseRatio()
         self.validation_step_outputs = []
         self.validation_step_gt = []
+        self.last_loss = None
         
     @torch.jit.script
     def compute_projection_values(num_points: int,
@@ -161,6 +162,15 @@ class MLP(LightningModule):
             attenuation_values = self.forward(points)
             attenuation_values = attenuation_values.view(target.shape)
             loss = self.loss_fn(attenuation_values,target)
+            self.log_dict(
+                {
+                    "train/loss": loss,
+                },
+                on_step=False,
+                on_epoch=True,
+            )
+            
+            return loss
         else:
             if self.noisy:
                 noise = torch.zeros_like(step_size,device=points.device)
@@ -178,17 +188,24 @@ class MLP(LightningModule):
             loss = self.loss_fn(detector_value_hat, target)
 
             total_loss = loss + self.l1_regularization_weight*smoothness_loss
-        self.log_dict(
-            {
-                "train/loss": loss,
-                "train/loss_total":total_loss,
-                "train/l1_regularization":smoothness_loss,
-            },
-            on_step=False,
-            on_epoch=True,
-        )
 
-        return total_loss
+            if self.last_loss != None:
+                if total_loss/self.last_loss > 10:
+                    return None
+                else:
+                    self.last_loss = total_loss
+        
+            self.log_dict(
+                {
+                    "train/loss": loss,
+                    "train/loss_total":total_loss,
+                    "train/l1_regularization":smoothness_loss,
+                },
+                on_step=True,
+                on_epoch=True,
+            )
+            
+            return total_loss
 
     def validation_step(self, batch, batch_idx):
         points, target, _ = batch
@@ -272,7 +289,7 @@ class MLP(LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
         # return optimizer
-        lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=20, factor=0.5, cooldown=1)
+        lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=15, factor=0.5, cooldown=1)
         lr_scheduler_config = {
             "scheduler": lr_scheduler,
             "interval": "epoch",
