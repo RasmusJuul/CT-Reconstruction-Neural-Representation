@@ -19,18 +19,19 @@ def get_activation_function(activation_function,**kwargs):
     elif activation_function == 'none':
         return torch.nn.Identity(**kwargs)
     elif activation_function == 'sine':
-        return Sine(**kwargs)
+        return torch.jit.script(Sine(**kwargs))
     else:
         raise ValueError(f"Unknown activation function: {activation_function}")
 
 class TrigonometricEncoder(torch.nn.Module):
     
-    def __init__(self,num_freq_bands):
+    def __init__(self,num_freq_bands: int):
         super(TrigonometricEncoder,self).__init__()
         
         self.num_freq_bands = num_freq_bands
-        
-    def forward(self,idxs):
+           
+    def forward(self,idxs: torch.Tensor
+               ) -> torch.Tensor:
         idxs = idxs.T
         enc = [idxs]
         for i in range(self.num_freq_bands):
@@ -45,7 +46,8 @@ class Sine(torch.nn.Module):
     def __init(self):
         super().__init__()
 
-    def forward(self, input):
+    def forward(self, input: torch.Tensor
+               ) -> torch.Tensor:
         # See Siren paper sec. 3.2, final paragraph, and supplement Sec. 1.5 for discussion of factor 30
         return torch.sin(30 * input)
 
@@ -64,6 +66,23 @@ def first_layer_sine_init(m):
             num_input = m.weight.size(-1)
             m.weight.uniform_(-1 / num_input, 1 / num_input)
 
+@torch.jit.script
+def compute_projection_values(num_points: int,
+                              attenuation_values: torch.Tensor
+                             ) -> torch.Tensor:
+    I0 = 1
+    # Compute the spacing between ray points
+    dx = 2 / (num_points)
+
+    # Compute the sum of mu * dx along each ray
+    attenuation_sum = torch.sum(attenuation_values * dx, dim=1)
+
+    # Compute the intensity at the detector using the Beer-Lambert Law
+    intensity = I0 * torch.exp(-attenuation_sum)
+    
+    # Inverse the intensity to make it look like CT
+    return I0-intensity
+
 
 class MLP(LightningModule):
 
@@ -78,8 +97,7 @@ class MLP(LightningModule):
 
         self.l1_regularization_weight = args_dict['training']['regularization_weight']
 
-        if self.imagefit_mode:
-            self.img_shape = tifffile.imread(f"{args_dict['general']['data_path']}.tif").shape
+        
 
         self.num_freq_bands = args_dict['model']['num_freq_bands']
         self.num_hidden_layers = args_dict['model']['num_hidden_layers']
@@ -87,7 +105,7 @@ class MLP(LightningModule):
         self.activation_function = args_dict['model']['activation_function']
 
         if self.num_freq_bands > 0:
-            self.trig_encoder = TrigonometricEncoder(num_freq_bands=self.num_freq_bands)
+            self.trig_encoder = torch.jit.script(TrigonometricEncoder(num_freq_bands=self.num_freq_bands))
             num_input_features = 3 * (self.num_freq_bands * 2 + 1) # +1 for the constant (original input)
         else:
             num_input_features = 3 # x,y,z coordinate
@@ -115,26 +133,9 @@ class MLP(LightningModule):
         self.psnr = tm.image.PeakSignalNoiseRatio()
         self.validation_step_outputs = []
         self.validation_step_gt = []
-        self.last_loss = None
-        
-    @torch.jit.script
-    def compute_projection_values(num_points: int,
-                                  attenuation_values: torch.Tensor
-                                 ) -> torch.Tensor:
-        I0 = 1
-        # Compute the spacing between ray points
-        dx = 2 / (num_points)
 
-        # Compute the sum of mu * dx along each ray
-        attenuation_sum = torch.sum(attenuation_values * dx, dim=1)
-    
-        # Compute the intensity at the detector using the Beer-Lambert Law
-        intensity = I0 * torch.exp(-attenuation_sum)
-        
-        # Inverse the intensity to make it look like CT
-        return I0-intensity
+        self.img_shape = tifffile.imread(f"{args_dict['general']['data_path']}.tif").shape
 
-    
     def forward(self, pts):
         pts_shape = pts.shape
 
@@ -182,18 +183,12 @@ class MLP(LightningModule):
 
             
             attenuation_values = self.forward(points.view(-1,3)).view(points.shape[0],points.shape[1])
-            detector_value_hat = self.compute_projection_values(points.shape[1],attenuation_values)
+            detector_value_hat = compute_projection_values(points.shape[1],attenuation_values)
 
             smoothness_loss = self.l1_regularization(attenuation_values[:,1:],attenuation_values[:,:-1])
             loss = self.loss_fn(detector_value_hat, target)
 
             total_loss = loss + self.l1_regularization_weight*smoothness_loss
-
-            if self.last_loss != None:
-                if total_loss/self.last_loss > 10:
-                    return None
-                else:
-                    self.last_loss = total_loss
         
             self.log_dict(
                 {
@@ -219,7 +214,7 @@ class MLP(LightningModule):
             self.validation_step_gt.append(target)
         else:
             attenuation_values = self.forward(points.view(-1,3)).view(points.shape[0],points.shape[1])
-            detector_value_hat = self.compute_projection_values(points.shape[1],attenuation_values)
+            detector_value_hat = compute_projection_values(points.shape[1],attenuation_values)
 
             smoothness_loss = self.l1_regularization(attenuation_values[:,1:],attenuation_values[:,:-1])
     
@@ -259,42 +254,48 @@ class MLP(LightningModule):
             psnr = self.psnr(preds.unsqueeze(dim=0).unsqueeze(dim=0),gt.unsqueeze(dim=0).unsqueeze(dim=0))
             self.log("val/psnr_projection",psnr)
 
-            img = self.trainer.val_dataloaders.dataset.img
-            
+            img = self.trainer.val_dataloaders.dataset.img.to(device=self.device)
             mgrid = torch.stack(torch.meshgrid(torch.linspace(-1, 1, img.shape[0]), torch.linspace(-1, 1, img.shape[1]), torch.linspace(-1, 1, img.shape[2]), indexing='ij'),dim=-1)
             mgrid = mgrid.view(-1,img.shape[2],3)
-            outputs = torch.zeros((*mgrid.shape[:2],1))
-            for i in range(mgrid.shape[1]):
-                output = self.forward(mgrid[:,i,:].to(device=self.device))
-                
-                outputs[:,i,:] = output.cpu()
-
-            outputs = outputs.view(img.shape)
+            mgrid = mgrid.to(device=self.device)
+            outputs = torch.zeros((*mgrid.shape[:2],1),device=self.device)
+            with torch.no_grad():
+                for i in range(mgrid.shape[1]):
+                    output = self.forward(mgrid[:,i,:])
+                    
+                    outputs[:,i,:] = output
+    
+                outputs = outputs.view(self.img_shape)
             self.log("val/psnr_reconstruction",self.psnr(outputs.unsqueeze(dim=0).unsqueeze(dim=0),img.unsqueeze(dim=0).unsqueeze(dim=0)))
             self.log("val/loss_reconstruction",self.loss_fn(outputs,img))
-            self.logger.log_image(key="val/reconstruction", images=[outputs[img.shape[2]//2,:,:], img[img.shape[2]//2,:,:],
-                                                                    outputs[:,img.shape[2]//2,:], img[:,img.shape[2]//2,:],
-                                                                    outputs[:,:,img.shape[2]//2], img[:,:,img.shape[2]//2]],
+            self.logger.log_image(key="val/reconstruction", images=[outputs[self.img_shape[2]//2,:,:], img[self.img_shape[2]//2,:,:],
+                                                                    outputs[:,self.img_shape[2]//2,:], img[:,self.img_shape[2]//2,:],
+                                                                    outputs[:,:,self.img_shape[2]//2], img[:,:,self.img_shape[2]//2]],
                                   caption=["pred_xy", "gt_xy",
                                            "pred_yz", "gt_yz",
                                            "pred_xz", "gt_xz"])
             
-        
+        del outputs
+        del mgrid
         self.validation_step_outputs.clear()  # free memory
         self.validation_step_gt.clear()  # free memory
+        torch.cuda.empty_cache()
 
     def test_step(self, batch, batch_idx):
         return None
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, fused=True, foreach=True, amsgrad=True)
         # return optimizer
-        lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=15, factor=0.5, cooldown=1)
+        # lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5, cooldown=1)
+        # lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, 10, T_mult=2, eta_min=0, last_epoch=-1)
+        lambda_ = lambda epoch: 0.96 ** epoch
+        lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lambda_)
         lr_scheduler_config = {
             "scheduler": lr_scheduler,
-            "interval": "epoch",
-            "frequency":5,
-            "monitor": "val/loss_total",}
+            "interval": "epoch",}
+            # "frequency":5,
+            # "monitor": "val/loss_total",}
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler_config}
         
 

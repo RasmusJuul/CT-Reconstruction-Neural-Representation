@@ -102,6 +102,10 @@ class CTpoints(torch.utils.data.Dataset):
         positions = np.load(f"{data_path}_positions.npy")
         self.projections = np.load(f"{data_path}_projections.npy")
         
+        if self.args['training']['noisy_data']:
+            self.projections += np.random.normal(loc=0,scale=self.args['training']['noise_std'],size=self.projections.shape)
+            self.projections = np.clip(self.projections,0,1)
+        
         img = torch.tensor(tifffile.imread(f"{args_dict['general']['data_path']}.tif"))
         img -= img.min()
         img = img/img.max()
@@ -122,16 +126,16 @@ class CTpoints(torch.utils.data.Dataset):
         source_pos = torch.tensor(positions[:,:3])
         object_shape = self.img.shape
         
-        self.geometries = [None]*positions.shape[0]
+        # self.geometries = [None]*positions.shape[0]
 
         self.points = torch.zeros((self.projections.shape[0],self.projections.shape[1]*self.projections.shape[2],self.args['training']['num_points']+1,3))
         self.step_sizes = torch.zeros((*self.projections.shape,3))
         
         for i in tqdm(range(positions.shape[0]),desc='Generating points from rays'):
-            self.geometries[i] = Geometry(source_pos[i],detector_pos[i],self.detector_size,detector_pixel_size[i],object_shape)
-            self.geometries[i].sample_points(self.args['training']['num_points'])
-            self.points[i] = self.geometries[i].points
-            self.step_sizes[i] = self.geometries[i].step_size
+            geometries = Geometry(source_pos[i],detector_pos[i],self.detector_size,detector_pixel_size[i],object_shape)
+            geometries.sample_points(self.args['training']['num_points'])
+            self.points[i] = geometries.points
+            self.step_sizes[i] = geometries.step_size
             
         self.points = self.points.view(-1,*self.points.shape[-2:])
         self.step_sizes = self.step_sizes.view(-1,3)
@@ -177,6 +181,7 @@ class CTDataModule(pl.LightningDataModule):
         super().__init__()
         self.args = args_dict
         self.num_poses = num_poses
+        self.batch_size = self.args["training"]["batch_size"]
 
     def setup(self, stage=None):
         """
@@ -196,10 +201,13 @@ class CTDataModule(pl.LightningDataModule):
         """
         return DataLoader(
             self.dataset,
-            batch_size=self.args["training"]["batch_size"],
+            batch_size=self.batch_size,
             num_workers=self.args["training"]["num_workers"],
             pin_memory=True,
             shuffle=shuffle,
+            drop_last=True,
+            persistent_workers=True,
+            prefetch_factor=3,
         )
 
     def val_dataloader(self):
@@ -208,9 +216,10 @@ class CTDataModule(pl.LightningDataModule):
         """
         return DataLoader(
             self.dataset,
-            batch_size=self.args["training"]["batch_size"],
+            batch_size=self.batch_size,
             num_workers=self.args["training"]["num_workers"],
             pin_memory=True,
+            prefetch_factor=3,
         )
 
     def test_dataloader(self):
@@ -219,14 +228,7 @@ class CTDataModule(pl.LightningDataModule):
         """
         return DataLoader(
             self.dataset,
-            batch_size=self.args["training"]["batch_size"],
-            num_workers=self.args["training"]["num_workers"],
-            pin_memory=True,
-        )
-    def dataloader_for_testing(self):
-        return DataLoader(
-            self.dataset,
-            batch_size=self.args["training"]["batch_size"],
+            batch_size=self.batch_size,
             num_workers=self.args["training"]["num_workers"],
             pin_memory=True,
         )

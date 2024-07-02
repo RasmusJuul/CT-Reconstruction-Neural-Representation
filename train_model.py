@@ -10,9 +10,9 @@ from pytorch_lightning.callbacks import (
     EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
-    StochasticWeightAveraging,
 )
-from lightning.pytorch.profilers import AdvancedProfiler
+# from lightning.pytorch.profilers import PyTorchProfiler, SimpleProfiler
+# from lightning.pytorch.tuner import Tuner
 from pytorch_lightning.loggers import WandbLogger
 import wandb
 
@@ -22,7 +22,7 @@ from src.models.mlp import MLP
 from src import get_device
 
 torch._dynamo.config.suppress_errors = True
-
+    
 def main(args_dict):
     seed_everything(args_dict['general']['seed'], workers=True)
 
@@ -42,8 +42,9 @@ def main(args_dict):
     if args_dict['general']['checkpoint_path'] != None:
         model.load_state_dict(torch.load(f"{_PATH_MODELS}/{args_dict['general']['checkpoint_path']}", map_location=None)['state_dict'], strict=True)
     
-    if args_dict['training']['compiled']:
-        model = torch.compile(model)
+    # if args_dict['training']['compiled']:
+    #     model = torch.compile(model,dynamic=True)
+            
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=f"{_PATH_MODELS}/{args_dict['general']['experiment_name']}-{time}",
@@ -68,9 +69,7 @@ def main(args_dict):
         check_on_train_epoch_end=False,
         check_finite = True,
     )
-    swa = StochasticWeightAveraging(swa_lrs=1e-2,swa_epoch_start=100)
 
-    profiler = AdvancedProfiler(dirpath=".", filename="perf_logs")
     
     trainer = Trainer(
         max_epochs=args_dict['training']['num_epochs'],
@@ -79,18 +78,16 @@ def main(args_dict):
         deterministic=False,
         default_root_dir=_PROJECT_ROOT,
         precision="16-mixed",
-        callbacks=[checkpoint_callback, early_stopping_callback,lr_monitor,swa],
+        callbacks=[checkpoint_callback, early_stopping_callback,lr_monitor],
         log_every_n_steps=25,
         logger=wandb_logger,
-        strategy='ddp',
-        num_sanity_val_steps=-1,
+        # strategy='ddp',
+        num_sanity_val_steps=0,
         gradient_clip_val=0.5,
         check_val_every_n_epoch=5,
-        profiler = profiler,
-        detect_anomaly=True,
+        
     )
 
-    
     trainer.fit(
         model,
         datamodule=datamodule,
@@ -114,7 +111,9 @@ if __name__=="__main__":
     parser_training.add_argument('--imagefit-mode', action='store_true', help='Enable training of imagefit in addition to detector fitting')
     parser_training.add_argument('--compiled', action='store_true', help='Whether or not to torch compile the model')
     parser_training.add_argument('--noisy-points', action='store_true', help='Whether or not to add noise to the point')
-    parser_training.add_argument('--regularization-weight', type=float, default=1, help='weight used to scale the L1 loss of diffenrence between adjacent points on ray')
+    parser_training.add_argument('--regularization-weight', type=float, default=1e-1, help='weight used to scale the L1 loss of diffenrence between adjacent points on ray')
+    parser_training.add_argument('--noisy-data', action='store_true', help='Whether or not to add noise to the projections')
+    parser_training.add_argument('--noise-std', type=float, default=1e-2, help='standard deviation of the gaussian noise added to the projections if noisy-data is on')
     
     
     parser_model = parser.add_argument_group('Model')
@@ -150,6 +149,8 @@ if __name__=="__main__":
             "compiled":args.compiled,
             "noisy_points":args.noisy_points,
             "regularization_weight":args.regularization_weight,
+            "noisy_data":args.noisy_data,
+            "noise_std":args.noise_std,
         },
         "model": { 
             "model_type": args.model_type,
