@@ -11,7 +11,7 @@ from pytorch_lightning.callbacks import (
     LearningRateMonitor,
     ModelCheckpoint,
 )
-# from lightning.pytorch.profilers import PyTorchProfiler, SimpleProfiler
+from lightning.pytorch.profilers import PyTorchProfiler, SimpleProfiler
 # from lightning.pytorch.tuner import Tuner
 from pytorch_lightning.loggers import WandbLogger
 import wandb
@@ -37,7 +37,7 @@ def main(args_dict):
     
     model = MLP(args_dict, 
                 projection_shape=projection_shape,
-               ).to(args_dict['training']['device'])
+               ).to(device=args_dict['training']['device'])
 
     if args_dict['general']['checkpoint_path'] != None:
         model.load_state_dict(torch.load(f"{_PATH_MODELS}/{args_dict['general']['checkpoint_path']}", map_location=None)['state_dict'], strict=True)
@@ -70,6 +70,7 @@ def main(args_dict):
         check_finite = True,
     )
 
+    profiler = PyTorchProfiler(dirpath=".",filename="profile",sort_by_key="cpu_time_total")
     
     trainer = Trainer(
         max_epochs=args_dict['training']['num_epochs'],
@@ -81,10 +82,11 @@ def main(args_dict):
         callbacks=[checkpoint_callback, early_stopping_callback,lr_monitor],
         log_every_n_steps=25,
         logger=wandb_logger,
-        # strategy='ddp',
+        strategy='ddp',
         num_sanity_val_steps=0,
-        gradient_clip_val=0.5,
+        # gradient_clip_val=0.5,
         check_val_every_n_epoch=5,
+        # profiler=profiler,
         
     )
 
