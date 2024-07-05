@@ -43,32 +43,32 @@ class Geometry(torch.nn.Module):
         self.beam_type = beam_type
         self.object_shape = object_shape
 
-        self.detector_coordinates()
+        # Convert into relative coordinates 
+        self.source_pos[0] /= self.object_shape[0]/2
+        self.source_pos[1] /= self.object_shape[1]/2
+        self.source_pos[2] /= self.object_shape[2]/2
+        
+        self.detector_pos[0] /= self.object_shape[0]/2
+        self.detector_pos[1] /= self.object_shape[1]/2
+        self.detector_pos[2] /= self.object_shape[2]/2
+        
+        self.u_vec[0] /= self.object_shape[0]/2
+        self.u_vec[1] /= self.object_shape[1]/2
+        self.u_vec[2] /= self.object_shape[2]/2
+
+        self.v_vec[0] /= self.object_shape[0]/2
+        self.v_vec[1] /= self.object_shape[1]/2
+        self.v_vec[2] /= self.object_shape[2]/2
+        
+
+        self.detector_pixel_coordinates = self.create_grid(self.detector_pos, self.u_vec, self.v_vec, self.detector_size[0],self.detector_size[1])
+        
         self.ray_directions()
-        self.min_depth = -source_pos[2]-object_shape[2]/2
-        self.max_depth = self.min_depth + object_shape[2]
-        self.start_points = (self.source_pos/(self.object_shape[2]/2) + self.rays * self.min_depth/(self.object_shape[2]/2)) 
-        self.end_points =  self.source_pos/(self.object_shape[2]/2) + self.rays * self.max_depth/(self.object_shape[2]/2)
 
-    def detector_coordinates(self):
-        x_component = self.u_vec*(self.detector_size[0]/2)
-        y_component = self.v_vec*(self.detector_size[1]/2)
-        
-        bottom_left_corner = self.detector_pos - x_component - y_component
-        bottom_left_corner_pixel_pos = bottom_left_corner + self.u_vec/6 + self.v_vec/6 #Something weird here I would expect it to be self.u_vec/2 + self.v_vec/2
+        self.start_points, self.end_points, self.valid_indices = self.ray_sphere_intersections(self.source_pos.repeat(self.detector_size[0]*self.detector_size[1]).view(-1,3),self.rays.view(-1,3),torch.zeros(3),torch.sqrt(torch.tensor(3.)))
 
-        detector_pixel_coordinates = torch.zeros((self.detector_size[0],self.detector_size[1],3))
-        if self.detector_size[0] == self.detector_size[1]:
-            for i in range(self.detector_size[0]):
-                detector_pixel_coordinates[:,i,0] = torch.arange(0,self.detector_size[0])
-                detector_pixel_coordinates[i,:,1] = torch.arange(0,self.detector_size[1])
-        else:
-            for i in range(self.detector_size[1]):
-                detector_pixel_coordinates[:,i,0] = torch.arange(0,self.detector_size[0])
-            for i in range(self.detector_size[0]):
-                detector_pixel_coordinates[i,:,1] = torch.arange(0,self.detector_size[1])
-        
-        self.detector_pixel_coordinates = (detector_pixel_coordinates * self.u_vec + detector_pixel_coordinates * self.v_vec)+bottom_left_corner_pixel_pos
+        self.start_points[~self.valid_indices] = self.source_pos
+        self.end_points[~self.valid_indices] = self.detector_pixel_coordinates.view(-1,3)[~self.valid_indices]
     
     def ray_directions(self):
         self.rays = (self.detector_pixel_coordinates - self.source_pos)
@@ -76,21 +76,78 @@ class Geometry(torch.nn.Module):
         self.rays[:,:,0] = self.rays[:,:,0] / lengths
         self.rays[:,:,1] = self.rays[:,:,1] / lengths
         self.rays[:,:,2] = self.rays[:,:,2] / lengths
+
+    def ray_sphere_intersections(self,ray_origins, ray_directions, sphere_center, sphere_radius):
+        """
+        Calculates the intersection points between rays and a sphere using PyTorch tensors.
+        
+        Args:
+            ray_origins (torch.Tensor): Tensor of 3D coordinates of ray origins (shape: (n, 3)).
+            ray_directions (torch.Tensor): Tensor of 3D vectors representing ray directions (shape: (n, 3)).
+            sphere_center (torch.Tensor): 3D coordinates of the sphere center.
+            sphere_radius (float): Radius of the sphere.
+        
+        Returns:
+            torch.Tensor: Intersection points for each ray (shape: (n, 3)).
+        """
+        # Compute vector from ray origins to sphere center
+        oc = ray_origins - sphere_center
+        
+        # Compute discriminant
+        a = torch.sum(ray_directions**2, dim=1)
+        b = 2.0 * torch.sum(oc * ray_directions, dim=1)
+        c = torch.sum(oc**2, dim=1) - sphere_radius**2
+        discriminant = b**2 - 4*a*c
+        
+        # Initialize intersection points tensor
+        start_points = torch.zeros_like(ray_origins)
+        end_points = torch.zeros_like(ray_origins)
+        
+        # Calculate intersection points for rays with non-negative discriminant
+        valid_indices = discriminant >= 0
+        t1 = (-b[valid_indices] - torch.sqrt(discriminant[valid_indices])) / (2*a[valid_indices])
+        t2 = (-b[valid_indices] + torch.sqrt(discriminant[valid_indices])) / (2*a[valid_indices])
+        start_points[valid_indices] = ray_origins[valid_indices] + t1[:, None] * ray_directions[valid_indices]
+        end_points[valid_indices] = ray_origins[valid_indices] + t2[:, None] * ray_directions[valid_indices]
+        return start_points, end_points, valid_indices
+
+    def create_grid(self,detector_pos, u_vec, v_vec, u_size,v_size):
+        # Initialize the grid
+        detector_pixels = torch.zeros((u_size, v_size, 3), dtype=torch.double)
     
-    def sample_points(self,num_points,noise=False):
+        # Calculate the starting point of the grid
+        start_pos = detector_pos - (u_size//2)*u_vec - (v_size//2)*v_vec #+ u_vec/2 + v_vec/2
+    
+        # Create ranges for u and v
+        u_range = torch.arange(u_size).view(-1, 1, 1).double()
+        v_range = torch.arange(v_size).view(1, -1, 1).double()
+    
+        # Fill the grid using broadcasting and vectorized operations
+        detector_pixels = start_pos + u_range * u_vec + v_range * v_vec
+    
+        return detector_pixels
+    
+    def sample_points(self, num_points):
         """
         Parameters
         ----------
         num_points : int
             Number of points sampled per ray 
         """
-        self.step_size = (self.end_points-self.start_points)/num_points
-        points = torch.zeros(self.detector_size[0],self.detector_size[1],num_points+1,3)
-        for i in range(num_points+1):
-            points[:,:,i,:] = self.start_points + self.step_size*i
+        # Compute the step size for each ray by dividing the total distance by the number of points
+        step_size = (self.end_points - self.start_points) / num_points
+    
+        # Create a tensor 'steps' of shape (num_points+1, 1, 1)
+        # This tensor represents the step indices for each point along the ray
+        steps = torch.arange(num_points + 1).unsqueeze(-1).unsqueeze(-1)
+    
+        # Compute the coordinates of each point along the ray by adding the start point to the product of the step size and the step indices
+        # This uses broadcasting to perform the computation for all points and all rays at once
+        points = self.start_points + step_size * steps
+    
+        # Permute the dimensions of the points tensor to match the expected output shape
+        return points.permute(1,0,2), step_size
 
-
-        self.points = points.view(-1,num_points+1,3)
         
 
 class CTpoints(torch.utils.data.Dataset):
@@ -129,17 +186,16 @@ class CTpoints(torch.utils.data.Dataset):
         # self.geometries = [None]*positions.shape[0]
 
         self.points = torch.zeros((self.projections.shape[0],self.projections.shape[1]*self.projections.shape[2],self.args['training']['num_points']+1,3))
-        self.step_sizes = torch.zeros((*self.projections.shape,3))
+        self.step_sizes = torch.zeros((self.projections.shape[0],self.projections.shape[1]*self.projections.shape[2],3))
+        
         
         for i in tqdm(range(positions.shape[0]),desc='Generating points from rays'):
-            geometries = Geometry(source_pos[i],detector_pos[i],self.detector_size,detector_pixel_size[i],object_shape)
-            geometries.sample_points(self.args['training']['num_points'])
-            self.points[i] = geometries.points
-            self.step_sizes[i] = geometries.step_size
+            geometry = Geometry(source_pos[i],detector_pos[i],self.detector_size,detector_pixel_size[i],object_shape)
+            self.points[i], self.step_sizes[i] = geometry.sample_points(self.args['training']['num_points'])
             
         self.points = self.points.view(-1,*self.points.shape[-2:])
         self.step_sizes = self.step_sizes.view(-1,3)
-        
+        self.lengths = torch.linalg.norm((self.points[:,-1,:] - self.points[:,0,:]),dim=1)
     
     def __len__(self):
         if self.args['training']['imagefit_mode']:
@@ -157,8 +213,9 @@ class CTpoints(torch.utils.data.Dataset):
             x = self.points[idx].view(-1,3)
             y = self.projections.flatten()[idx]
             step_size = self.step_sizes[idx]
+            length = self.lengths[idx]
             
-        return x,y,step_size
+        return x,y,step_size,length
 
 
 
