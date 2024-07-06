@@ -37,7 +37,7 @@ def main(args_dict):
     
     model = MLP(args_dict, 
                 projection_shape=projection_shape,
-               ).to(device=args_dict['training']['device'])
+               )
 
     if args_dict['general']['checkpoint_path'] != None:
         model.load_state_dict(torch.load(f"{_PATH_MODELS}/{args_dict['general']['checkpoint_path']}", map_location=None)['state_dict'], strict=True)
@@ -83,7 +83,7 @@ def main(args_dict):
         log_every_n_steps=25,
         logger=wandb_logger,
         strategy='ddp',
-        num_sanity_val_steps=0,
+        num_sanity_val_steps=-1,
         # gradient_clip_val=0.5,
         check_val_every_n_epoch=5,
         # profiler=profiler,

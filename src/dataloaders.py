@@ -116,7 +116,7 @@ class Geometry(torch.nn.Module):
         detector_pixels = torch.zeros((u_size, v_size, 3), dtype=torch.double)
     
         # Calculate the starting point of the grid
-        start_pos = detector_pos - (u_size//2)*u_vec - (v_size//2)*v_vec #+ u_vec/2 + v_vec/2
+        start_pos = detector_pos - (u_size//2)*u_vec - (v_size//2)*v_vec + u_vec/6.5 + v_vec/6.5
     
         # Create ranges for u and v
         u_range = torch.arange(u_size).view(-1, 1, 1).double()
@@ -151,7 +151,7 @@ class Geometry(torch.nn.Module):
         
 
 class CTpoints(torch.utils.data.Dataset):
-    def __init__(self, args_dict):
+    def __init__(self, args_dict, noisy_points=False):
 
         self.args = args_dict
         data_path = self.args['general']['data_path'] 
@@ -196,6 +196,8 @@ class CTpoints(torch.utils.data.Dataset):
         self.points = self.points.view(-1,*self.points.shape[-2:])
         self.step_sizes = self.step_sizes.view(-1,3)
         self.lengths = torch.linalg.norm((self.points[:,-1,:] - self.points[:,0,:]),dim=1)
+
+        self.noisy = noisy_points
     
     def __len__(self):
         if self.args['training']['imagefit_mode']:
@@ -206,16 +208,21 @@ class CTpoints(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         if self.args['training']['imagefit_mode']:
-            x = self.mgrid[:,idx,:]
-            y = self.img[:,:,idx]
-            step_size = None
+            points = self.mgrid[:,idx,:]
+            targets = self.img[:,:,idx]
+            length = None
         else:
-            x = self.points[idx].view(-1,3)
-            y = self.projections.flatten()[idx]
+            points = self.points[idx].view(-1,3)
+            targets = self.projections.flatten()[idx]
             step_size = self.step_sizes[idx]
             length = self.lengths[idx]
+
+            if self.noisy:
+                noise = torch.zeros_like(step_size)
+                noise = (torch.rand(noise.shape)-0.5)*0.5
+                points = points+(noise*step_size)[None,:]
             
-        return x,y,step_size,length
+        return points,targets,length
 
 
 
@@ -247,7 +254,12 @@ class CTDataModule(pl.LightningDataModule):
         Args:
         - stage (str, optional): The stage for which data needs to be set up. Defaults to None.
         """
-        self.dataset = CTpoints(self.args)
+        if self.args['training']['noisy_points']:
+            self.train_dataset = CTpoints(self.args, noisy_points=True)
+            self.validation_dataset = CTpoints(self.args, noisy_points=False)
+        else:
+            self.train_dataset = CTpoints(self.args, noisy_points=False)
+            self.validation_dataset = CTpoints(self.args, noisy_points=False)
         # if stage == "test" or stage is None:
         # if stage == "fit" or stage is None:
             
@@ -257,7 +269,7 @@ class CTDataModule(pl.LightningDataModule):
         Returns the training data loader.
         """
         return DataLoader(
-            self.dataset,
+            self.train_dataset,
             batch_size=self.batch_size,
             num_workers=self.args["training"]["num_workers"],
             pin_memory=True,
@@ -272,7 +284,7 @@ class CTDataModule(pl.LightningDataModule):
         Returns the validation data loader.
         """
         return DataLoader(
-            self.dataset,
+            self.validation_dataset,
             batch_size=self.batch_size,
             num_workers=self.args["training"]["num_workers"],
             pin_memory=True,
@@ -284,7 +296,7 @@ class CTDataModule(pl.LightningDataModule):
         Returns the test data loader.
         """
         return DataLoader(
-            self.dataset,
+            self.validation_dataset,
             batch_size=self.batch_size,
             num_workers=self.args["training"]["num_workers"],
             pin_memory=True,

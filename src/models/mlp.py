@@ -19,8 +19,7 @@ def get_activation_function(activation_function,args_dict,**kwargs):
     elif activation_function == 'none':
         return torch.nn.Identity(**kwargs)
     elif activation_function == 'sine':
-        return torch.jit.script(Sine(**kwargs).to(device=args_dict['training']['device']))
-        # return torch.jit.script(Sine(**kwargs))
+        return torch.jit.script(Sine(**kwargs)).to(device=args_dict['training']['device'])
     else:
         raise ValueError(f"Unknown activation function: {activation_function}")
 
@@ -67,22 +66,23 @@ def first_layer_sine_init(m):
             num_input = m.weight.size(-1)
             m.weight.uniform_(-1 / num_input, 1 / num_input)
 
-# @torch.jit.script
-# def compute_projection_values(num_points: int,
-#                               attenuation_values: torch.Tensor
-#                              ) -> torch.Tensor:
-#     I0 = 1
-#     # Compute the spacing between ray points
-#     dx = 2 / (num_points)
+@torch.jit.script
+def compute_projection_values(num_points: int,
+                              attenuation_values: torch.Tensor,
+                              lengths: torch.Tensor,
+                             ) -> torch.Tensor:
+    I0 = 1
+    # Compute the spacing between ray points
+    dx = lengths / (num_points)
 
-#     # Compute the sum of mu * dx along each ray
-#     attenuation_sum = torch.sum(attenuation_values * dx, dim=1)
+    # Compute the sum of mu * dx along each ray
+    attenuation_sum = torch.sum(attenuation_values * dx[:,None], dim=1)
 
-#     # Compute the intensity at the detector using the Beer-Lambert Law
-#     intensity = I0 * torch.exp(-attenuation_sum)
+    # Compute the intensity at the detector using the Beer-Lambert Law
+    intensity = I0 * torch.exp(-attenuation_sum)
     
-#     # Inverse the intensity to make it look like CT
-#     return I0-intensity
+    # Inverse the intensity to make it look like CT
+    return I0-intensity
 
 def lr_lambda(epoch: int):
     if epoch <= 10:
@@ -99,7 +99,6 @@ class MLP(LightningModule):
         self.projection_shape = projection_shape
         self.lr = args_dict['training']['learning_rate']
         self.imagefit_mode = args_dict["training"]["imagefit_mode"]
-        self.noisy = args_dict['training']['noisy_points']
 
         self.l1_regularization_weight = args_dict['training']['regularization_weight']
 
@@ -130,6 +129,7 @@ class MLP(LightningModule):
                                        get_activation_function(self.activation_function,args_dict),
                                        *layers,
                                         torch.nn.Linear(self.num_hidden_features,1),
+                                        torch.nn.Sigmoid(),
                                         )
 
         if self.activation_function == 'sine':
@@ -160,25 +160,9 @@ class MLP(LightningModule):
 
         return out
 
-    def compute_projection_values(self, num_points: int,
-                              attenuation_values: torch.Tensor
-                             ) -> torch.Tensor:
-        I0 = 1
-        # Compute the spacing between ray points
-        dx = 2 / (num_points)
-    
-        # Compute the sum of mu * dx along each ray
-        attenuation_sum = torch.sum(attenuation_values * dx, dim=1)
-    
-        # Compute the intensity at the detector using the Beer-Lambert Law
-        intensity = I0 * torch.exp(-attenuation_sum)
-        
-        # Inverse the intensity to make it look like CT
-        return I0-intensity
-
     def training_step(self, batch, batch_idx):
         # training_step defines the train loop.
-        points, target, step_size = batch
+        points, target, lengths = batch
         points_dtype = points.dtype
 
         if self.imagefit_mode:
@@ -195,17 +179,11 @@ class MLP(LightningModule):
             
             return loss
         else:
-            if self.noisy:
-                noise = torch.zeros_like(step_size,device=points.device)
-                noise[:,0] = (torch.rand(noise[:,0].shape,device=points.device)-0.5)*0.1
-                noise[:,1] = (torch.rand(noise[:,1].shape,device=points.device)-0.5)*0.1
-                noise[:,2] = torch.rand(noise[:,2].shape,device=points.device)-0.5
-                points = points+(noise*step_size)[:,None,:]
-                points = points.to(points_dtype)
+            
 
             
             attenuation_values = self.forward(points.view(-1,3)).view(points.shape[0],points.shape[1])
-            detector_value_hat = self.compute_projection_values(points.shape[1],attenuation_values)
+            detector_value_hat = compute_projection_values(points.shape[1],attenuation_values,lengths)
 
             smoothness_loss = self.l1_regularization(attenuation_values[:,1:],attenuation_values[:,:-1])
             loss = self.loss_fn(detector_value_hat, target)
@@ -225,7 +203,7 @@ class MLP(LightningModule):
             return total_loss
 
     def validation_step(self, batch, batch_idx):
-        points, target, _ = batch
+        points, target, lengths = batch
         if self.imagefit_mode:
             attenuation_values = self.forward(points)
             attenuation_values = attenuation_values.view(target.shape)
@@ -236,7 +214,7 @@ class MLP(LightningModule):
             self.validation_step_gt.append(target)
         else:
             attenuation_values = self.forward(points.view(-1,3)).view(points.shape[0],points.shape[1])
-            detector_value_hat = self.compute_projection_values(points.shape[1],attenuation_values)
+            detector_value_hat = compute_projection_values(points.shape[1],attenuation_values,lengths)
 
             smoothness_loss = self.l1_regularization(attenuation_values[:,1:],attenuation_values[:,:-1])
     
