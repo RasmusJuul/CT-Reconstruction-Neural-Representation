@@ -78,17 +78,13 @@ def compute_projection_values(num_points: int,
     # Compute the sum of mu * dx along each ray
     attenuation_sum = torch.sum(attenuation_values * dx[:,None], dim=1)
 
-    # Compute the intensity at the detector using the Beer-Lambert Law
-    intensity = I0 * torch.exp(-attenuation_sum)
-    
-    # Inverse the intensity to make it look like CT
-    return I0-intensity
+    return attenuation_sum
 
 def lr_lambda(epoch: int):
-    if epoch <= 10:
+    if epoch <= 100:
         return 1.0
     else:
-        return 0.97 ** (epoch-10)
+        return 0.97 ** (epoch-100)
 
 class MLP(LightningModule):
 
@@ -129,7 +125,7 @@ class MLP(LightningModule):
                                        get_activation_function(self.activation_function,args_dict),
                                        *layers,
                                         torch.nn.Linear(self.num_hidden_features,1),
-                                        torch.nn.Sigmoid(),
+                                        torch.nn.ReLU(),
                                         )
 
         if self.activation_function == 'sine':
@@ -162,8 +158,7 @@ class MLP(LightningModule):
 
     def training_step(self, batch, batch_idx):
         # training_step defines the train loop.
-        points, target, lengths = batch
-        points_dtype = points.dtype
+        points, target = batch
 
         if self.imagefit_mode:
             attenuation_values = self.forward(points)
@@ -175,35 +170,41 @@ class MLP(LightningModule):
                 },
                 on_step=False,
                 on_epoch=True,
+                sync_dist=True,
             )
             
             return loss
         else:
-            
-
-            
-            attenuation_values = self.forward(points.view(-1,3)).view(points.shape[0],points.shape[1])
+            lengths = torch.linalg.norm((points[:,-1,:] - points[:,0,:]),dim=1)
+            attenuation_values = self.forward(points).view(points.shape[0],points.shape[1])
             detector_value_hat = compute_projection_values(points.shape[1],attenuation_values,lengths)
 
-            smoothness_loss = self.l1_regularization(attenuation_values[:,1:],attenuation_values[:,:-1])
+            smoothness_loss = self.l1_regularization(attenuation_values[:,1:],attenuation_values[:,:-1]) # punish model for big changes between adjacent points (to make it smooth)
             loss = self.loss_fn(detector_value_hat, target)
 
-            total_loss = loss + self.l1_regularization_weight*smoothness_loss
+            if self.current_epoch > 10:
+                clamp_loss = (torch.maximum(2*torch.abs(attenuation_values-.5)-1,torch.tensor(0,device=self.device))).mean() #punishing model hard for having outputs outside of 0-1
+            else:
+                clamp_loss = 0
+
+            total_loss = loss + self.l1_regularization_weight*smoothness_loss + clamp_loss
         
             self.log_dict(
                 {
                     "train/loss": loss,
                     "train/loss_total":total_loss,
                     "train/l1_regularization":smoothness_loss,
+                    "train/clamp_loss":clamp_loss
                 },
                 on_step=True,
                 on_epoch=True,
+                sync_dist=True,
             )
             
             return total_loss
 
     def validation_step(self, batch, batch_idx):
-        points, target, lengths = batch
+        points, target = batch
         if self.imagefit_mode:
             attenuation_values = self.forward(points)
             attenuation_values = attenuation_values.view(target.shape)
@@ -213,15 +214,16 @@ class MLP(LightningModule):
             self.validation_step_outputs.append(attenuation_values)
             self.validation_step_gt.append(target)
         else:
-            attenuation_values = self.forward(points.view(-1,3)).view(points.shape[0],points.shape[1])
+            lengths = torch.linalg.norm((points[:,-1,:] - points[:,0,:]),dim=1)
+            attenuation_values = self.forward(points).view(points.shape[0],points.shape[1])
             detector_value_hat = compute_projection_values(points.shape[1],attenuation_values,lengths)
 
             smoothness_loss = self.l1_regularization(attenuation_values[:,1:],attenuation_values[:,:-1])
     
             loss = self.loss_fn(detector_value_hat, target)
             
-            self.validation_step_outputs.append(detector_value_hat)
-            self.validation_step_gt.append(target)
+            self.validation_step_outputs.append(detector_value_hat.detach().cpu())
+            self.validation_step_gt.append(target.detach().cpu())
 
             total_loss = loss + self.l1_regularization_weight*smoothness_loss
 
@@ -233,6 +235,7 @@ class MLP(LightningModule):
             },
             on_step=False,
             on_epoch=True,
+            sync_dist=True,
         )
         
 
@@ -248,28 +251,27 @@ class MLP(LightningModule):
             psnr = self.psnr(preds.unsqueeze(dim=0).unsqueeze(dim=0),gt.unsqueeze(dim=0).unsqueeze(dim=0))
             self.log("val/reconstruction",psnr)
         else:
-            preds = all_preds.view(self.projection_shape)
-            gt = all_gt.view(self.projection_shape)
+            valid_indices = self.trainer.val_dataloaders.dataset.valid_indices.view(self.projection_shape)
+            preds = torch.zeros(self.projection_shape,dtype=all_preds.dtype)
+            preds[valid_indices] = all_preds
+            gt = torch.zeros(self.projection_shape,dtype=all_gt.dtype)
+            gt[valid_indices] = all_gt
 
             for i in range(self.projection_shape[0]):
                 self.logger.log_image(key="val/projection", images=[preds[i], gt[i], (gt[i]-preds[i])], caption=[f"pred_{i}", f"gt_{i}",f"residual_{i}"]) # log projection images
-            psnr = self.psnr(preds.unsqueeze(dim=0).unsqueeze(dim=0),gt.unsqueeze(dim=0).unsqueeze(dim=0))
-            self.log("val/psnr_projection",psnr)
 
-            img = self.trainer.val_dataloaders.dataset.img.to(device=self.device)
-            mgrid = torch.stack(torch.meshgrid(torch.linspace(-1, 1, img.shape[0]), torch.linspace(-1, 1, img.shape[1]), torch.linspace(-1, 1, img.shape[2]), indexing='ij'),dim=-1)
+            img = self.trainer.val_dataloaders.dataset.img
+            mgrid = torch.stack(torch.meshgrid(torch.linspace(-1-(1/img.shape[0]), 1-(1/img.shape[0]), img.shape[0]), torch.linspace(-1-(1/img.shape[0]), 1-(1/img.shape[0]), img.shape[0]), torch.linspace(-1-(1/img.shape[0]), 1-(1/img.shape[0]), img.shape[0]), indexing='ij'),dim=-1)
             mgrid = mgrid.view(-1,img.shape[2],3)
-            mgrid = mgrid.to(device=self.device)
-            outputs = torch.zeros((*mgrid.shape[:2],1),device=self.device)
+            outputs = torch.zeros((*mgrid.shape[:2],1))
             with torch.no_grad():
                 for i in range(mgrid.shape[1]):
-                    output = self.forward(mgrid[:,i,:])
+                    output = self.forward(mgrid[:,i,:].to(device=self.device))
                     
-                    outputs[:,i,:] = output
+                    outputs[:,i,:] = output.cpu()
     
                 outputs = outputs.view(self.img_shape)
 
-            self.log("val/psnr_reconstruction",self.psnr(outputs.unsqueeze(dim=0).unsqueeze(dim=0),img.unsqueeze(dim=0).unsqueeze(dim=0)))
             self.log("val/loss_reconstruction",self.loss_fn(outputs,img))
             self.logger.log_image(key="val/reconstruction", images=[outputs[self.img_shape[2]//2,:,:], img[self.img_shape[2]//2,:,:], (img[self.img_shape[2]//2,:,:]-outputs[self.img_shape[2]//2,:,:]),
                                                                     outputs[:,self.img_shape[2]//2,:], img[:,self.img_shape[2]//2,:], (img[:,self.img_shape[2]//2,:]-outputs[:,self.img_shape[2]//2,:]),
@@ -278,28 +280,20 @@ class MLP(LightningModule):
                                            "pred_yz", "gt_yz","residual_yz",
                                            "pred_xz", "gt_xz","residual_xz",])
             
-        del outputs
-        del mgrid
+
         self.validation_step_outputs.clear()  # free memory
         self.validation_step_gt.clear()  # free memory
-        torch.cuda.empty_cache()
 
     def test_step(self, batch, batch_idx):
         return None
 
     def configure_optimizers(self):
-        # optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, fused=True, amsgrad=True)
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, amsgrad=True)
-        # return optimizer
-        # lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5, cooldown=1)
-        # lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, 10, T_mult=2, eta_min=0, last_epoch=-1)
-        
+        # return optimizer  
         lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
         lr_scheduler_config = {
             "scheduler": lr_scheduler,
             "interval": "epoch",}
-            # "frequency":5,
-            # "monitor": "val/loss_total",}
         return {"optimizer": optimizer, "lr_scheduler": lr_scheduler_config}
         
 

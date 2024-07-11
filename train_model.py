@@ -12,7 +12,6 @@ from pytorch_lightning.callbacks import (
     ModelCheckpoint,
 )
 from lightning.pytorch.profilers import PyTorchProfiler, SimpleProfiler
-# from lightning.pytorch.tuner import Tuner
 from pytorch_lightning.loggers import WandbLogger
 import wandb
 
@@ -80,7 +79,7 @@ def main(args_dict):
         default_root_dir=_PROJECT_ROOT,
         precision="16-mixed",
         callbacks=[checkpoint_callback, early_stopping_callback,lr_monitor],
-        log_every_n_steps=25,
+        log_every_n_steps=10,
         logger=wandb_logger,
         strategy='ddp',
         num_sanity_val_steps=-1,
