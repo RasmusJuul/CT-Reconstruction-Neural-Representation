@@ -24,15 +24,11 @@ torch._dynamo.config.suppress_errors = True
     
 def main(args_dict):
     seed_everything(args_dict['general']['seed'], workers=True)
-
+    torch.set_float32_matmul_precision("medium")
     time = str(datetime.datetime.now())[:-10].replace(" ", "-").replace(":", "")
 
-    torch.set_float32_matmul_precision("medium")
-
     projection_shape = np.load(f"{args_dict['general']['data_path']}_projections.npy").shape
-    
     datamodule = CTDataModule(args_dict,num_poses=projection_shape[0])
-    
     
     model = MLP(args_dict, 
                 projection_shape=projection_shape,
@@ -40,13 +36,10 @@ def main(args_dict):
 
     if args_dict['general']['checkpoint_path'] != None:
         model.load_state_dict(torch.load(f"{_PATH_MODELS}/{args_dict['general']['checkpoint_path']}", map_location=None)['state_dict'], strict=True)
-    
-    # if args_dict['training']['compiled']:
-    #     model = torch.compile(model,dynamic=True)
             
 
     checkpoint_callback = ModelCheckpoint(
-        dirpath=f"{_PATH_MODELS}/{args_dict['general']['experiment_name']}-{time}",
+        dirpath=f"{_PATH_MODELS}/{args_dict['general']['experiment_name']}_{args_dict['model']['encoder']}_{args_dict['model']['activation_function']}_regularization-weight-{args_dict['training']['regularization_weight']}_noise-level-{args_dict['training']['noise_level']}-{time}",
         filename="MLP-{epoch}",
         monitor="val/loss_total",
         mode="min",
@@ -54,14 +47,14 @@ def main(args_dict):
         auto_insert_metric_name=True,
     )
 
-    wandb_logger = WandbLogger(project="Renner", name=args_dict['general']['experiment_name'], log_model="all")
+    wandb_logger = WandbLogger(project="Renner", name=f"{args_dict['general']['experiment_name']}_{args_dict['model']['encoder']}_{args_dict['model']['activation_function']}_regularization-weight-{args_dict['training']['regularization_weight']}_noise-level-{args_dict['training']['noise_level']}")
     wandb_logger.watch(model, log="all")
     
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
 
     early_stopping_callback = EarlyStopping(
         monitor="val/loss_total",
-        patience=30,
+        patience=5,
         verbose=True,
         mode="min",
         strict=False,
@@ -83,8 +76,7 @@ def main(args_dict):
         logger=wandb_logger,
         strategy='ddp',
         num_sanity_val_steps=-1,
-        # gradient_clip_val=0.5,
-        check_val_every_n_epoch=5,
+        check_val_every_n_epoch=10,
         # profiler=profiler,
         
     )
@@ -99,7 +91,7 @@ if __name__=="__main__":
 
     parser_general = parser.add_argument_group('General')
     parser_general.add_argument('--experiment-name', type=str, default='test', help='Name of the experiment')
-    parser_general.add_argument('--data-path', type=str, default='data/synthetic_fibers/train/000/fiber_00000', help='Path to data')
+    parser_general.add_argument('--data-path', type=str, default='data/walnut_small_angle/walnut_small', help='Path to data')
     parser_general.add_argument('--checkpoint-path', type=str, default=None, help='Path to checkpoint to continue training from')
     parser_general.add_argument('--seed', type=int, default=42, help='set seed')
     
@@ -110,11 +102,9 @@ if __name__=="__main__":
     parser_training.add_argument('--learning-rate', type=float, default=1e-4, help='Learning rate for the optimizer')
     parser_training.add_argument('--num-points', type=int, default=256, help='Number of points sampled per ray')
     parser_training.add_argument('--imagefit-mode', action='store_true', help='Enable training of imagefit in addition to detector fitting')
-    parser_training.add_argument('--compiled', action='store_true', help='Whether or not to torch compile the model')
     parser_training.add_argument('--noisy-points', action='store_true', help='Whether or not to add noise to the point')
     parser_training.add_argument('--regularization-weight', type=float, default=1e-1, help='weight used to scale the L1 loss of diffenrence between adjacent points on ray')
-    parser_training.add_argument('--noisy-data', action='store_true', help='Whether or not to add noise to the projections')
-    parser_training.add_argument('--noise-std', type=float, default=1e-2, help='standard deviation of the gaussian noise added to the projections if noisy-data is on')
+    parser_training.add_argument('--noise-level', type=float, default=None, help='constant which will be multiplied by gaussian noise with 0 mean and std of the mean value of the projections')
     
     
     parser_model = parser.add_argument_group('Model')
@@ -125,7 +115,8 @@ if __name__=="__main__":
     # Arguments for MLP model
     parser_model.add_argument('--num-hidden-layers', type=int, default=4, help='Number of layers in the MLP model')
     parser_model.add_argument('--num-hidden-features', type=int, default=256, help='Number of hidden units in the MLP model')
-    parser_model.add_argument('--num-freq-bands', type=int, default=6, help='Number of frequency bands in the MLP model')
+    parser_model.add_argument('--encoder', type=str, default='hashgrid', choices=['hashgrid', 'frequency'], help='Encoder used in the MLP model')
+    parser_model.add_argument('--num-freq-bands', type=int, default=6, help='Number of frequency bands in the MLP model if frequency encoder is choosen')
     parser_model.add_argument('--activation-function', type=str, default='relu', choices=['relu', 'leaky_relu','tanh', 'sigmoid', 'elu','none','sine'], help='Activation function in the MLP model')
     
     args = parser.parse_args()
@@ -147,16 +138,15 @@ if __name__=="__main__":
             "num_workers":args.num_workers,
             "num_points":args.num_points,
             "imagefit_mode":args.imagefit_mode,
-            "compiled":args.compiled,
             "noisy_points":args.noisy_points,
             "regularization_weight":args.regularization_weight,
-            "noisy_data":args.noisy_data,
-            "noise_std":args.noise_std,
+            "noise_level":args.noise_level,
         },
         "model": { 
             "model_type": args.model_type,
             "num_hidden_layers": args.num_hidden_layers,
             "num_hidden_features": args.num_hidden_features,
+            "encoder":args.encoder,
             "num_freq_bands": args.num_freq_bands,
             "activation_function": args.activation_function,
         },

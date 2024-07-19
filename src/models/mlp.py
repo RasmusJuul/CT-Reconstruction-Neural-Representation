@@ -4,6 +4,8 @@ from pytorch_lightning import LightningModule
 import torchmetrics as tm
 import tifffile
 from tqdm import tqdm
+import tinycudann as tcnn
+from src.encoder import get_encoder
 
 def get_activation_function(activation_function,args_dict,**kwargs):
     if activation_function == 'relu':
@@ -81,10 +83,10 @@ def compute_projection_values(num_points: int,
     return attenuation_sum
 
 def lr_lambda(epoch: int):
-    if epoch <= 100:
+    if epoch <= 50:
         return 1.0
     else:
-        return 0.97 ** (epoch-100)
+        return 0.97 ** (epoch-50)
 
 class MLP(LightningModule):
 
@@ -98,19 +100,23 @@ class MLP(LightningModule):
 
         self.l1_regularization_weight = args_dict['training']['regularization_weight']
 
-        
-
         self.num_freq_bands = args_dict['model']['num_freq_bands']
         self.num_hidden_layers = args_dict['model']['num_hidden_layers']
         self.num_hidden_features = args_dict['model']['num_hidden_features']
         self.activation_function = args_dict['model']['activation_function']
 
-        if self.num_freq_bands > 0:
-            self.trig_encoder = torch.jit.script(TrigonometricEncoder(num_freq_bands=self.num_freq_bands))
-            # self.trig_encoder = TrigonometricEncoder(num_freq_bands=self.num_freq_bands)
-            self.trig_encoder = self.trig_encoder.to(device=args_dict['training']['device'])
-            num_input_features = 3 * (self.num_freq_bands * 2 + 1) # +1 for the constant (original input)
+        if args_dict['model']['encoder'] == 'frequency':
+            if self.num_freq_bands > 0:
+                self.encoder = torch.jit.script(TrigonometricEncoder(num_freq_bands=self.num_freq_bands))
+                self.encoder = self.encoder.to(device=args_dict['training']['device'])
+                num_input_features = 3 * (self.num_freq_bands * 2 + 1) # +1 for the constant (original input)
+            else:
+                num_input_features = 3 # x,y,z coordinate
+        elif args_dict['model']['encoder'] == 'hashgrid':
+            self.encoder = get_encoder(encoding="hashgrid", input_dim=3, num_levels=16, level_dim=2, base_resolution=16, log2_hashmap_size=19)
+            num_input_features = self.encoder.output_dim
         else:
+            self.encoder = None
             num_input_features = 3 # x,y,z coordinate
 
 
@@ -125,7 +131,7 @@ class MLP(LightningModule):
                                        get_activation_function(self.activation_function,args_dict),
                                        *layers,
                                         torch.nn.Linear(self.num_hidden_features,1),
-                                        torch.nn.ReLU(),
+                                        torch.nn.Sigmoid(),
                                         )
 
         if self.activation_function == 'sine':
@@ -138,14 +144,15 @@ class MLP(LightningModule):
         self.validation_step_outputs = []
         self.validation_step_gt = []
 
+
     def forward(self, pts):
         pts_shape = pts.shape
 
         if len(pts.shape) > 2:
             pts = pts.view(-1,3)
 
-        if self.num_freq_bands > 0:
-            enc = self.trig_encoder(pts)
+        if self.encoder != None:
+            enc = self.encoder(pts)
         else:
             enc = pts
 
@@ -182,19 +189,13 @@ class MLP(LightningModule):
             smoothness_loss = self.l1_regularization(attenuation_values[:,1:],attenuation_values[:,:-1]) # punish model for big changes between adjacent points (to make it smooth)
             loss = self.loss_fn(detector_value_hat, target)
 
-            if self.current_epoch > 10:
-                clamp_loss = (torch.maximum(2*torch.abs(attenuation_values-.5)-1,torch.tensor(0,device=self.device))).mean() #punishing model hard for having outputs outside of 0-1
-            else:
-                clamp_loss = 0
-
-            total_loss = loss + self.l1_regularization_weight*smoothness_loss + clamp_loss
+            total_loss = loss + self.l1_regularization_weight*smoothness_loss
         
             self.log_dict(
                 {
                     "train/loss": loss,
                     "train/loss_total":total_loss,
                     "train/l1_regularization":smoothness_loss,
-                    "train/clamp_loss":clamp_loss
                 },
                 on_step=True,
                 on_epoch=True,
@@ -242,27 +243,27 @@ class MLP(LightningModule):
     def on_validation_epoch_end(self):     
         all_preds = torch.cat(self.validation_step_outputs)
         all_gt = torch.cat(self.validation_step_gt)
-        img = self.trainer.val_dataloaders.dataset.img.to(device=self.device)
-        self.img_shape = img.shape
+        vol = self.trainer.val_dataloaders.dataset.vol.to(device=self.device)
+        self.vol_shape = vol.shape
         if self.imagefit_mode:
-            preds = all_preds.view(self.img_shape)
-            gt = all_gt.view(self.img_shape)
-            self.logger.log_image(key="val/reconstruction", images=[preds[self.img_shape[2]//2,:,:], gt[self.img_shape[2]//2,:,:]], caption=["pred", "gt"]) # log projection images
+            preds = all_preds.view(self.vol_shape)
+            gt = all_gt.view(self.vol_shape)
+            self.logger.log_image(key="val/reconstruction", images=[preds[self.vol_shape[2]//2,:,:], gt[self.vol_shape[2]//2,:,:]], caption=["pred", "gt"]) # log projection images
             psnr = self.psnr(preds.unsqueeze(dim=0).unsqueeze(dim=0),gt.unsqueeze(dim=0).unsqueeze(dim=0))
             self.log("val/reconstruction",psnr)
         else:
-            valid_indices = self.trainer.val_dataloaders.dataset.valid_indices.view(self.projection_shape)
+            valid_rays = self.trainer.val_dataloaders.dataset.valid_rays.view(self.projection_shape)
             preds = torch.zeros(self.projection_shape,dtype=all_preds.dtype)
-            preds[valid_indices] = all_preds
+            preds[valid_rays] = all_preds
             gt = torch.zeros(self.projection_shape,dtype=all_gt.dtype)
-            gt[valid_indices] = all_gt
+            gt[valid_rays] = all_gt
 
-            for i in range(self.projection_shape[0]):
+            for i in np.random.randint(0,self.projection_shape[0],5):
                 self.logger.log_image(key="val/projection", images=[preds[i], gt[i], (gt[i]-preds[i])], caption=[f"pred_{i}", f"gt_{i}",f"residual_{i}"]) # log projection images
 
-            img = self.trainer.val_dataloaders.dataset.img
-            mgrid = torch.stack(torch.meshgrid(torch.linspace(-1-(1/img.shape[0]), 1-(1/img.shape[0]), img.shape[0]), torch.linspace(-1-(1/img.shape[0]), 1-(1/img.shape[0]), img.shape[0]), torch.linspace(-1-(1/img.shape[0]), 1-(1/img.shape[0]), img.shape[0]), indexing='ij'),dim=-1)
-            mgrid = mgrid.view(-1,img.shape[2],3)
+            vol = self.trainer.val_dataloaders.dataset.vol
+            mgrid = torch.stack(torch.meshgrid(torch.linspace(-1, 1, vol.shape[0]), torch.linspace(-1, 1, vol.shape[0]), torch.linspace(-1, 1, vol.shape[0]), indexing='ij'),dim=-1)
+            mgrid = mgrid.view(-1,vol.shape[2],3)
             outputs = torch.zeros((*mgrid.shape[:2],1))
             with torch.no_grad():
                 for i in range(mgrid.shape[1]):
@@ -270,12 +271,12 @@ class MLP(LightningModule):
                     
                     outputs[:,i,:] = output.cpu()
     
-                outputs = outputs.view(self.img_shape)
+                outputs = outputs.view(self.vol_shape)
 
-            self.log("val/loss_reconstruction",self.loss_fn(outputs,img))
-            self.logger.log_image(key="val/reconstruction", images=[outputs[self.img_shape[2]//2,:,:], img[self.img_shape[2]//2,:,:], (img[self.img_shape[2]//2,:,:]-outputs[self.img_shape[2]//2,:,:]),
-                                                                    outputs[:,self.img_shape[2]//2,:], img[:,self.img_shape[2]//2,:], (img[:,self.img_shape[2]//2,:]-outputs[:,self.img_shape[2]//2,:]),
-                                                                    outputs[:,:,self.img_shape[2]//2], img[:,:,self.img_shape[2]//2], (img[:,:,self.img_shape[2]//2]-outputs[:,:,self.img_shape[2]//2])],
+            self.log("val/loss_reconstruction",self.loss_fn(outputs,vol))
+            self.logger.log_image(key="val/reconstruction", images=[outputs[self.vol_shape[2]//2,:,:], vol[self.vol_shape[2]//2,:,:], (vol[self.vol_shape[2]//2,:,:]-outputs[self.vol_shape[2]//2,:,:]),
+                                                                    outputs[:,self.vol_shape[2]//2,:], vol[:,self.vol_shape[2]//2,:], (vol[:,self.vol_shape[2]//2,:]-outputs[:,self.vol_shape[2]//2,:]),
+                                                                    outputs[:,:,self.vol_shape[2]//2], vol[:,:,self.vol_shape[2]//2], (vol[:,:,self.vol_shape[2]//2]-outputs[:,:,self.vol_shape[2]//2])],
                                   caption=["pred_xy", "gt_xy","residual_xy",
                                            "pred_yz", "gt_yz","residual_yz",
                                            "pred_xz", "gt_xz","residual_xz",])
@@ -290,7 +291,8 @@ class MLP(LightningModule):
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, amsgrad=True)
         # return optimizer  
-        lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+        # lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, 50, T_mult=2)
         lr_scheduler_config = {
             "scheduler": lr_scheduler,
             "interval": "epoch",}
