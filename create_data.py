@@ -5,6 +5,8 @@ from tqdm import tqdm
 import tifffile
 import os
 
+from src import _PATH_DATA
+
 def generate_points(num_points, x_range, y_range, min_dist,rng):
     #generate vector points for the starting positions of every fibre.
     points = []
@@ -107,42 +109,78 @@ def main(mode,folder_name,count,i,seed):
 
     save_file(mode,folder_name,count,i,vol)
     
+def create_csv(split):
+    folder_name = f"synthetic_fibers"
+        
+    img_path = glob(f"{folder_name}/{split}/**/*.tif",root_dir=_PATH_DATA)
+    img_path.sort()
 
+    
+    df = pd.DataFrame()
+    
+    df["img_path"] = img_path
+
+    df["index"] = df.img_path.apply(lambda x: x.split("/")[-1][4:-4])
+    df.set_index("index",inplace=True)
+
+    df.to_csv(f"{_PATH_DATA}/{folder_name}/{split}.csv", index=False, encoding="utf-8")
+
+def create_hdf5_dataset(files, hdf5_path):
+    # Open the first image to get the shape
+    vol_shape = tifffile.imread(f"{_PATH_DATA}/{files[0]}").shape
+    
+    # Create HDF5 file
+    with h5py.File(hdf5_path, 'w') as hdf5_file:
+        # Create a dataset in the file
+        dataset = hdf5_file.create_dataset('volumes', (len(files), *vol_shape), dtype='uint8')
+        
+        # Loop through all images and save them to the dataset
+        for i, file in tqdm(enumerate(files),unit="vol", desc="Saving volumes to hdf5 file"):
+            vol = tifffile.imread(f"{_PATH_DATA}/{file}")
+            vol -= vol.min()
+            vol = vol/vol.max()
+            vol = vol.transpose(2,1,0)
+            dataset[i] = vol
 
 if __name__=="__main__":
     folder_name = "synthetic_fibers"
     
-    os.makedirs(f"data/{folder_name}/train", exist_ok=True)
-    os.makedirs(f"data/{folder_name}/test", exist_ok=True)
-    os.makedirs(f"data/{folder_name}/validation", exist_ok=True)
+    os.makedirs(f"{_PATH_DATA}/{folder_name}/train", exist_ok=True)
+    os.makedirs(f"{_PATH_DATA}/{folder_name}/test", exist_ok=True)
+    # os.makedirs(f"{_PATH_DATA}/{folder_name}/validation", exist_ok=True)
 
-    count_train = 2
-    count_test = 2
-    count_validation = 2
+    count_train = 1000
+    count_test = 100
+    # count_validation = 2
 
     for i in range(max(1,int(count_train / 100))):
-        os.makedirs(f"data/{folder_name}/train/{str(i).zfill(3)}", exist_ok=True)
+        os.makedirs(f"{_PATH_DATA}/{folder_name}/train/{str(i).zfill(3)}", exist_ok=True)
     for i in range(max(1,int(count_test / 100))):
-        os.makedirs(f"data/{folder_name}/test/{str(i).zfill(3)}", exist_ok=True)
-    for i in range(max(1,int(count_validation / 100))):
-        os.makedirs(f"data/{folder_name}/validation/{str(i).zfill(3)}", exist_ok=True)
+        os.makedirs(f"{_PATH_DATA}/{folder_name}/test/{str(i).zfill(3)}", exist_ok=True)
+    # for i in range(max(1,int(count_validation / 100))):
+    #     os.makedirs(f"data/{folder_name}/validation/{str(i).zfill(3)}", exist_ok=True)
 
     rng_train = np.random.SeedSequence(42).generate_state(count_train)
     rng_test = np.random.SeedSequence(1337).generate_state(count_test)
-    rng_validation = np.random.SeedSequence(1997).generate_state(count_validation)
+    # rng_validation = np.random.SeedSequence(1997).generate_state(count_validation)
 
 
     Parallel(n_jobs=-1)(delayed(main)
                         ("train",folder_name,count_train,i,rng_train[i])
                         for i in tqdm(range(count_train), unit="image", desc="creating training fiber volumes"))
+    create_csv("train")
+    files = pd.read_csv(f"{_PATH_DATA}/{folder_name}/train.csv", header=0).img_path.to_list()
+    create_hdf5_dataset(files, f"{_PATH_DATA}/{folder_name}/train.hdf5")
     Parallel(n_jobs=-1)(delayed(main)
                         ("test",folder_name,count_test,i,rng_test[i])
                         for i in tqdm(range(count_test), unit="image", desc="creating testing fiber volumes"))
-    Parallel(n_jobs=-1)(delayed(main)
-                        ("validation",folder_name,count_validation,i,rng_validation[i])
-                        for i in tqdm(range(count_validation), unit="image", desc="creating validation fiber volumes"))
-
-
+    create_csv("test")
+    files = pd.read_csv(f"{_PATH_DATA}/{folder_name}/test.csv", header=0).img_path.to_list()
+    create_hdf5_dataset(files, f"{_PATH_DATA}/{folder_name}/test.hdf5")
+    # Parallel(n_jobs=-1)(delayed(main)
+    #                     ("validation",folder_name,count_validation,i,rng_validation[i])
+    #                     for i in tqdm(range(count_validation), unit="image", desc="creating validation fiber volumes"))
+    # create_csv("validation")
 
 
 

@@ -1,10 +1,11 @@
 import torch
+import math
 import numpy as np
 from pytorch_lightning import LightningModule
 import torchmetrics as tm
 import tifffile
 from tqdm import tqdm
-import tinycudann as tcnn
+# import tinycudann as tcnn
 from src.encoder import get_encoder
 
 def get_activation_function(activation_function,args_dict,**kwargs):
@@ -24,25 +25,6 @@ def get_activation_function(activation_function,args_dict,**kwargs):
         return torch.jit.script(Sine(**kwargs)).to(device=args_dict['training']['device'])
     else:
         raise ValueError(f"Unknown activation function: {activation_function}")
-
-class TrigonometricEncoder(torch.nn.Module):
-    
-    def __init__(self,num_freq_bands: int):
-        super(TrigonometricEncoder,self).__init__()
-        
-        self.num_freq_bands = num_freq_bands
-           
-    def forward(self,idxs: torch.Tensor
-               ) -> torch.Tensor:
-        idxs = idxs.T
-        enc = [idxs]
-        for i in range(self.num_freq_bands):
-            enc.append(torch.sin(2**i *torch.pi*idxs))
-            enc.append(torch.cos(2**i *torch.pi*idxs))
-            
-        enc = torch.cat(enc)
-        
-        return enc.T
         
 class Sine(torch.nn.Module):
     def __init(self):
@@ -90,7 +72,7 @@ def lr_lambda(epoch: int):
 
 class MLP(LightningModule):
 
-    def __init__(self,args_dict,projection_shape):
+    def __init__(self,args_dict,projection_shape,num_volumes):
         super(MLP,self).__init__()
         self.save_hyperparameters()
 
@@ -104,21 +86,24 @@ class MLP(LightningModule):
         self.num_hidden_layers = args_dict['model']['num_hidden_layers']
         self.num_hidden_features = args_dict['model']['num_hidden_features']
         self.activation_function = args_dict['model']['activation_function']
+        self.latent_size = args_dict['model']['latent_size']
 
-        if args_dict['model']['encoder'] == 'frequency':
-            if self.num_freq_bands > 0:
-                self.encoder = torch.jit.script(TrigonometricEncoder(num_freq_bands=self.num_freq_bands))
-                self.encoder = self.encoder.to(device=args_dict['training']['device'])
-                num_input_features = 3 * (self.num_freq_bands * 2 + 1) # +1 for the constant (original input)
-            else:
-                num_input_features = 3 # x,y,z coordinate
-        elif args_dict['model']['encoder'] == 'hashgrid':
-            self.encoder = get_encoder(encoding="hashgrid", input_dim=3, num_levels=16, level_dim=2, base_resolution=16, log2_hashmap_size=19)
+        # Initialising encoder
+        if args_dict['model']['encoder'] != None:
+            self.encoder = get_encoder(encoding=args_dict['model']['encoder'])
             num_input_features = self.encoder.output_dim
         else:
             self.encoder = None
             num_input_features = 3 # x,y,z coordinate
 
+        if self.imagefit_mode:
+            # Initialising latent vectors
+            self.lat_vecs = torch.nn.Embedding(num_volumes,self.latent_size)
+            torch.nn.init.normal_(self.lat_vecs.weight.data,
+                                  0.0,
+                                  1 / math.sqrt(self.latent_size),
+                                )
+            num_input_features += self.latent_size
 
         layers = []
         for i in range(self.num_hidden_layers):
@@ -145,7 +130,7 @@ class MLP(LightningModule):
         self.validation_step_gt = []
 
 
-    def forward(self, pts):
+    def forward(self, pts, vecs):
         pts_shape = pts.shape
 
         if len(pts.shape) > 2:
@@ -155,6 +140,8 @@ class MLP(LightningModule):
             enc = self.encoder(pts)
         else:
             enc = pts
+            
+        enc = torch.cat([vecs, enc], dim=1)
 
         out = self.mlp(enc)
 
@@ -165,17 +152,18 @@ class MLP(LightningModule):
 
     def training_step(self, batch, batch_idx):
         # training_step defines the train loop.
-        points, target = batch
-
+        points, target, idxs = batch
         if self.imagefit_mode:
-            attenuation_values = self.forward(points)
+            attenuation_values = self.forward(points,self.lat_vecs(idxs).repeat(1,points.shape[1],points.shape[2],1).view(-1,self.latent_size))
             attenuation_values = attenuation_values.view(target.shape)
+                
             loss = self.loss_fn(attenuation_values,target)
+            
             self.log_dict(
                 {
                     "train/loss": loss,
                 },
-                on_step=False,
+                on_step=True,
                 on_epoch=True,
                 sync_dist=True,
             )
@@ -183,7 +171,7 @@ class MLP(LightningModule):
             return loss
         else:
             lengths = torch.linalg.norm((points[:,-1,:] - points[:,0,:]),dim=1)
-            attenuation_values = self.forward(points).view(points.shape[0],points.shape[1])
+            attenuation_values = self.forward(points, idxs).view(points.shape[0],points.shape[1])
             detector_value_hat = compute_projection_values(points.shape[1],attenuation_values,lengths)
 
             smoothness_loss = self.l1_regularization(attenuation_values[:,1:],attenuation_values[:,:-1]) # punish model for big changes between adjacent points (to make it smooth)
@@ -205,9 +193,9 @@ class MLP(LightningModule):
             return total_loss
 
     def validation_step(self, batch, batch_idx):
-        points, target = batch
+        points, target, idxs = batch
         if self.imagefit_mode:
-            attenuation_values = self.forward(points)
+            attenuation_values = self.forward(points,self.lat_vecs(idxs).repeat(1,points.shape[1],points.shape[2],1).view(-1,self.latent_size))
             attenuation_values = attenuation_values.view(target.shape)
             
             loss = self.loss_fn(attenuation_values,target)
@@ -216,7 +204,7 @@ class MLP(LightningModule):
             self.validation_step_gt.append(target)
         else:
             lengths = torch.linalg.norm((points[:,-1,:] - points[:,0,:]),dim=1)
-            attenuation_values = self.forward(points).view(points.shape[0],points.shape[1])
+            attenuation_values = self.forward(points, idxs).view(points.shape[0],points.shape[1])
             detector_value_hat = compute_projection_values(points.shape[1],attenuation_values,lengths)
 
             smoothness_loss = self.l1_regularization(attenuation_values[:,1:],attenuation_values[:,:-1])
@@ -292,7 +280,10 @@ class MLP(LightningModule):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, amsgrad=True)
         # return optimizer  
         # lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
-        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, 50, T_mult=2)
+        if self.imagefit_mode:
+            lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, 10, T_mult=2)
+        else:
+            lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, 50, T_mult=2)
         lr_scheduler_config = {
             "scheduler": lr_scheduler,
             "interval": "epoch",}

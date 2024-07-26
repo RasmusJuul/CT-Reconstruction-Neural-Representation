@@ -2,6 +2,7 @@ import logging
 import datetime
 import argparse
 import numpy as np
+import pandas as pd
 
 import torch
 import torch._dynamo
@@ -16,7 +17,7 @@ from pytorch_lightning.loggers import WandbLogger
 import wandb
 
 from src import _PATH_DATA, _PATH_MODELS, _PROJECT_ROOT
-from src.dataloaders import CTDataModule
+from src.dataloaders import CTDataModule, ImagefitDataModule
 from src.models.mlp import MLP
 from src import get_device
 
@@ -27,59 +28,107 @@ def main(args_dict):
     torch.set_float32_matmul_precision("medium")
     time = str(datetime.datetime.now())[:-10].replace(" ", "-").replace(":", "")
 
-    projection_shape = np.load(f"{args_dict['general']['data_path']}_projections.npy").shape
-    datamodule = CTDataModule(args_dict,num_poses=projection_shape[0])
-    
+    if args_dict["training"]["imagefit_mode"]:
+        num_volumes = len(pd.read_csv(f"{_PATH_DATA}/{args_dict['general']['data_path']}/train.csv", header=0).img_path.to_list())
+        datamodule = ImagefitDataModule(args_dict)
+        projection_shape = None
+    else:
+        projection_shape = np.load(f"{args_dict['general']['data_path']}_projections.npy").shape
+        datamodule = CTDataModule(args_dict)
+        num_volumes = None
+        
+        
     model = MLP(args_dict, 
                 projection_shape=projection_shape,
+                num_volumes=num_volumes,
                )
 
     if args_dict['general']['checkpoint_path'] != None:
         model.load_state_dict(torch.load(f"{_PATH_MODELS}/{args_dict['general']['checkpoint_path']}", map_location=None)['state_dict'], strict=True)
             
 
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=f"{_PATH_MODELS}/{args_dict['general']['experiment_name']}_{args_dict['model']['encoder']}_{args_dict['model']['activation_function']}_regularization-weight-{args_dict['training']['regularization_weight']}_noise-level-{args_dict['training']['noise_level']}-{time}",
-        filename="MLP-{epoch}",
-        monitor="val/loss_total",
-        mode="min",
-        save_top_k=1,
-        auto_insert_metric_name=True,
-    )
+    
 
     wandb_logger = WandbLogger(project="Renner", name=f"{args_dict['general']['experiment_name']}_{args_dict['model']['encoder']}_{args_dict['model']['activation_function']}_regularization-weight-{args_dict['training']['regularization_weight']}_noise-level-{args_dict['training']['noise_level']}")
     wandb_logger.watch(model, log="all")
     
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
 
-    early_stopping_callback = EarlyStopping(
-        monitor="val/loss_total",
-        patience=5,
-        verbose=True,
-        mode="min",
-        strict=False,
-        check_on_train_epoch_end=False,
-        check_finite = True,
-    )
-
-    profiler = PyTorchProfiler(dirpath=".",filename="profile",sort_by_key="cpu_time_total")
     
-    trainer = Trainer(
-        max_epochs=args_dict['training']['num_epochs'],
-        devices=-1,
-        accelerator="gpu",
-        deterministic=False,
-        default_root_dir=_PROJECT_ROOT,
-        precision="16-mixed",
-        callbacks=[checkpoint_callback, early_stopping_callback,lr_monitor],
-        log_every_n_steps=10,
-        logger=wandb_logger,
-        strategy='ddp',
-        num_sanity_val_steps=-1,
-        check_val_every_n_epoch=10,
-        # profiler=profiler,
-        
-    )
+
+    if args_dict['training']['imagefit_mode']:
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=f"{_PATH_MODELS}/{args_dict['general']['experiment_name']}_{args_dict['model']['encoder']}_{args_dict['model']['activation_function']}_latent-size-{args_dict['model']['latent_size']}-{time}",
+            filename="MLP-{epoch}",
+            monitor="train/loss",
+            mode="min",
+            save_top_k=1,
+            save_last=True,
+            auto_insert_metric_name=True,
+            save_on_train_epoch_end=True,
+        )
+
+        early_stopping_callback = EarlyStopping(
+            monitor="train/loss",
+            patience=5,
+            verbose=True,
+            mode="min",
+            strict=False,
+            check_on_train_epoch_end=True,
+            check_finite = True,
+        )
+        trainer = Trainer(
+            max_epochs=args_dict['training']['num_epochs'],
+            devices=-1,
+            accelerator="gpu",
+            deterministic=False,
+            default_root_dir=_PROJECT_ROOT,
+            precision="16-mixed",
+            callbacks=[checkpoint_callback, early_stopping_callback,lr_monitor],
+            log_every_n_steps=10,
+            logger=wandb_logger,
+            strategy='ddp',
+            num_sanity_val_steps=0,
+            check_val_every_n_epoch=10000000,
+            limit_val_batches=0,
+            # profiler=profiler,
+            
+        )
+    else:
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=f"{_PATH_MODELS}/{args_dict['general']['experiment_name']}_{args_dict['model']['encoder']}_{args_dict['model']['activation_function']}_regularization-weight-{args_dict['training']['regularization_weight']}_noise-level-{args_dict['training']['noise_level']}-{time}",
+            filename="MLP-{epoch}",
+            monitor="val/loss_total",
+            mode="min",
+            save_top_k=1,
+            auto_insert_metric_name=True,
+        )
+
+        early_stopping_callback = EarlyStopping(
+            monitor="val/loss_total",
+            patience=5,
+            verbose=True,
+            mode="min",
+            strict=False,
+            check_on_train_epoch_end=False,
+            check_finite = True,
+        )
+        trainer = Trainer(
+            max_epochs=args_dict['training']['num_epochs'],
+            devices=-1,
+            accelerator="gpu",
+            deterministic=False,
+            default_root_dir=_PROJECT_ROOT,
+            precision="16-mixed",
+            callbacks=[checkpoint_callback, early_stopping_callback,lr_monitor],
+            log_every_n_steps=10,
+            logger=wandb_logger,
+            strategy='ddp',
+            num_sanity_val_steps=-1,
+            check_val_every_n_epoch=10,
+            # profiler=profiler,
+            
+        )
 
     trainer.fit(
         model,
@@ -91,7 +140,7 @@ if __name__=="__main__":
 
     parser_general = parser.add_argument_group('General')
     parser_general.add_argument('--experiment-name', type=str, default='test', help='Name of the experiment')
-    parser_general.add_argument('--data-path', type=str, default='data/walnut_small_angle/walnut_small', help='Path to data')
+    parser_general.add_argument('--data-path', type=str, default='walnut_small_angle/walnut_small', help='Path to data')
     parser_general.add_argument('--checkpoint-path', type=str, default=None, help='Path to checkpoint to continue training from')
     parser_general.add_argument('--seed', type=int, default=42, help='set seed')
     
@@ -101,7 +150,7 @@ if __name__=="__main__":
     parser_training.add_argument('--num-workers', type=int, default=0, help='Number of workers used in the dataloader')
     parser_training.add_argument('--learning-rate', type=float, default=1e-4, help='Learning rate for the optimizer')
     parser_training.add_argument('--num-points', type=int, default=256, help='Number of points sampled per ray')
-    parser_training.add_argument('--imagefit-mode', action='store_true', help='Enable training of imagefit in addition to detector fitting')
+    parser_training.add_argument('--imagefit-mode', action='store_true', help='Trains imagefit instead of detectorfit')
     parser_training.add_argument('--noisy-points', action='store_true', help='Whether or not to add noise to the point')
     parser_training.add_argument('--regularization-weight', type=float, default=1e-1, help='weight used to scale the L1 loss of diffenrence between adjacent points on ray')
     parser_training.add_argument('--noise-level', type=float, default=None, help='constant which will be multiplied by gaussian noise with 0 mean and std of the mean value of the projections')
@@ -115,9 +164,11 @@ if __name__=="__main__":
     # Arguments for MLP model
     parser_model.add_argument('--num-hidden-layers', type=int, default=4, help='Number of layers in the MLP model')
     parser_model.add_argument('--num-hidden-features', type=int, default=256, help='Number of hidden units in the MLP model')
-    parser_model.add_argument('--encoder', type=str, default='hashgrid', choices=['hashgrid', 'frequency'], help='Encoder used in the MLP model')
+    parser_model.add_argument('--encoder', type=str, default=None, choices=['hashgrid', 'frequency'], help='Encoder used in the MLP model')
     parser_model.add_argument('--num-freq-bands', type=int, default=6, help='Number of frequency bands in the MLP model if frequency encoder is choosen')
     parser_model.add_argument('--activation-function', type=str, default='relu', choices=['relu', 'leaky_relu','tanh', 'sigmoid', 'elu','none','sine'], help='Activation function in the MLP model')
+    parser_model.add_argument('--latent-size', type=int, default=256, help='Size of the latent vector')
+    parser_model.add_argument('--volume-sidelength', type=int, default=300, help='Side length of the volume, to be trained on')
     
     args = parser.parse_args()
     
@@ -125,22 +176,22 @@ if __name__=="__main__":
     args_dict = {
         "general": {
             "experiment_name": args.experiment_name,
-            "data_path":args.data_path,
-            "seed":args.seed,
-            "checkpoint_path":args.checkpoint_path,
+            "data_path": args.data_path,
+            "seed": args.seed,
+            "checkpoint_path": args.checkpoint_path,
             
         },
         "training": {
             "num_epochs": args.num_epochs,
             "batch_size": args.batch_size,
-            "learning_rate":args.learning_rate,
-            "device":get_device().type,
-            "num_workers":args.num_workers,
-            "num_points":args.num_points,
-            "imagefit_mode":args.imagefit_mode,
-            "noisy_points":args.noisy_points,
-            "regularization_weight":args.regularization_weight,
-            "noise_level":args.noise_level,
+            "learning_rate": args.learning_rate,
+            "device": get_device().type,
+            "num_workers": args.num_workers,
+            "num_points": args.num_points,
+            "imagefit_mode": args.imagefit_mode,
+            "noisy_points": args.noisy_points,
+            "regularization_weight": args.regularization_weight,
+            "noise_level": args.noise_level,
         },
         "model": { 
             "model_type": args.model_type,
@@ -149,6 +200,8 @@ if __name__=="__main__":
             "encoder":args.encoder,
             "num_freq_bands": args.num_freq_bands,
             "activation_function": args.activation_function,
+            "latent_size": args.latent_size,
+            "volume_sidelength": args.volume_sidelength,
         },
     }
     main(args_dict)
