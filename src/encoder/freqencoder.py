@@ -26,7 +26,7 @@ class FreqEncoder(nn.Module):
 
         self.freq_bands = self.freq_bands.numpy().tolist()
 
-    def forward(self, input, bound):
+    def forward(self, input):
 
         out = []
         if self.include_input:

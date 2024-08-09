@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
-
+import math
 import torch
 import h5py
 import numpy as np
@@ -18,7 +18,7 @@ from src import _PATH_DATA
 def collate_fn(batch):
     points = batch[0]
     targets = batch[1]
-    return points,targets
+    return points,targets,None
 
 def collate_fn_imagefit(batch):
     points = batch[0]
@@ -154,7 +154,6 @@ class CTpoints(torch.utils.data.Dataset):
         
         positions = np.load(f"{data_path}_positions.npy")
         self.projections = np.load(f"{data_path}_projections.npy")
-
         
         if self.args['training']['noise_level'] != None:
             self.projections += np.random.normal(loc=0,scale=self.projections.mean(),size=self.projections.shape)*self.args['training']['noise_level']
@@ -163,7 +162,7 @@ class CTpoints(torch.utils.data.Dataset):
         vol = torch.tensor(tifffile.imread(f"{data_path}.tif"))
         vol -= vol.min()
         vol = vol/vol.max()
-        self.vol = vol.permute(2,1,0)
+        self.vol = vol#.permute(2,1,0)
         
         self.detector_size = self.projections[0,:,:].shape
         detector_pos = torch.tensor(positions[:,3:6])
@@ -225,7 +224,7 @@ class CTpoints(torch.utils.data.Dataset):
             
         points = points.contiguous().to(dtype=torch.float)
         targets = targets.contiguous().to(dtype=torch.float)
-        return points,targets,None
+        return points,targets
         
 
 class CTDataModule(pl.LightningDataModule):
@@ -262,10 +261,20 @@ class CTDataModule(pl.LightningDataModule):
         elif stage == "test":
             self.test_dataset = CTpoints(self.args, noisy_points=False)
 
-    def train_dataloader(self,shuffle=True):
+    def train_dataloader(self,shuffle=True,notebook=False):
         """
         Returns the training data loader.
         """
+        if notebook:
+            return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.args["training"]["num_workers"],
+            pin_memory=True,
+            shuffle=shuffle,
+            drop_last=True,
+            collate_fn=collate_fn,
+        )
         return DataLoader(
             self.train_dataset,
             batch_size=self.batch_size,
@@ -278,10 +287,18 @@ class CTDataModule(pl.LightningDataModule):
             collate_fn=collate_fn,
         )
 
-    def val_dataloader(self):
+    def val_dataloader(self,notebook=False):
         """
         Returns the validation data loader.
         """
+        if notebook:
+            return DataLoader(
+            self.validation_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.args["training"]["num_workers"],
+            pin_memory=True,
+            collate_fn=collate_fn,
+        )
         return DataLoader(
             self.validation_dataset,
             batch_size=self.batch_size,
@@ -345,16 +362,67 @@ class Imagefit(torch.utils.data.Dataset):
         grid_idxs = idx%self.mgrid.shape[0]
 
         points = self.mgrid[grid_idxs]
-        targets = torch.zeros(*idx.shape,self.volume_sidelength,self.volume_sidelength,dtype=torch.uint8)
+        targets = torch.zeros(self.volume_sidelength,self.volume_sidelength,*idx.shape,dtype=torch.uint8)
         if self.dataset is None:
             self.dataset = h5py.File(f"{_PATH_DATA}/synthetic_fibers/train.hdf5", 'r')["volumes"]
 
         for img_idx in img_idxs.unique():
-            targets[img_idxs == img_idx] = torch.tensor(self.dataset[img_idx][grid_idxs[img_idxs == img_idx]])
+            temp = torch.tensor(self.dataset[img_idx][:,:,grid_idxs[img_idxs == img_idx]])
+            if len(temp.shape) < 3:
+                temp = temp.unsqueeze(dim=-1)
+            targets[:,:,img_idxs == img_idx] = temp
 
         targets = targets.to(dtype=torch.float).contiguous()
         points = points.to(dtype=torch.float).contiguous()
         return points, targets, img_idxs
+
+class Imagefit_slice(torch.utils.data.Dataset):
+    def __init__(self, args_dict,split="train"):
+        
+        files = pd.read_csv(f"{_PATH_DATA}/{args_dict['general']['data_path']}/{split}.csv", header=0)
+
+        self.image_paths = files.img_path.to_list()
+        self.volume_sidelength = args_dict['model']['volume_sidelength']
+
+        if len(self.image_paths)%args_dict["training"]["batch_size"] == 0:
+            mgrid = torch.stack(torch.meshgrid(
+                                        torch.linspace(-1, 1, self.volume_sidelength),
+                                        torch.linspace(-1, 1, self.volume_sidelength),
+                                        torch.linspace(-1, 1, self.volume_sidelength),
+                                        indexing='ij'),
+                                dim=-1)
+            self.points = mgrid[:,:,150].repeat(args_dict["training"]["batch_size"],1,1,1)
+            self.same_size_batches = True
+            print("same size batches")
+        else:
+            self.mgrid = torch.stack(torch.meshgrid(
+                                        torch.linspace(-1, 1, self.volume_sidelength),
+                                        torch.linspace(-1, 1, self.volume_sidelength),
+                                        torch.linspace(-1, 1, self.volume_sidelength),
+                                        indexing='ij'),
+                                dim=-1)
+            self.same_size_batches = False
+            
+        self.dataset = None
+    
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitems__(self,idx):
+        idx = torch.tensor(idx)
+        idx,_ = torch.sort(idx)
+        if not self.same_size_batches:
+            points = self.mgrid[:,:,150].repeat(len(idx),1,1,1)
+        else:
+            points = self.points
+        if self.dataset is None:
+            self.dataset = h5py.File(f"{_PATH_DATA}/synthetic_fibers/train_slice.hdf5", 'r')["volumes"]
+
+        targets = torch.tensor(self.dataset[idx])
+
+        targets = targets.to(dtype=torch.float).contiguous()
+        points = points.to(dtype=torch.float).contiguous()
+        return points, targets, idx
         
 
 class ImagefitDataModule(pl.LightningDataModule):
@@ -398,7 +466,7 @@ class ImagefitDataModule(pl.LightningDataModule):
             num_workers=self.args["training"]["num_workers"],
             pin_memory=True,
             shuffle=shuffle,
-            drop_last=True,
+            # drop_last=True,
             persistent_workers=True,
             prefetch_factor=10,
             collate_fn=collate_fn_imagefit,
