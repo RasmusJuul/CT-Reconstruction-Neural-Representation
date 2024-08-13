@@ -372,7 +372,7 @@ class Imagefit(torch.utils.data.Dataset):
                 temp = temp.unsqueeze(dim=-1)
             targets[:,:,img_idxs == img_idx] = temp
 
-        targets = targets.to(dtype=torch.float).contiguous()
+        targets = targets.to(dtype=torch.float).permute(2,0,1).contiguous()
         points = points.to(dtype=torch.float).contiguous()
         return points, targets, img_idxs
 

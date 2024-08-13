@@ -241,7 +241,7 @@ class MLP(LightningModule):
             if self.train_epoch_loss < self.smallest_train_loss:
                 self.smallest_train_loss = self.train_epoch_loss
                 self.train_epoch_loss = 0
-                torch.save(self.latent, f"{self.data_path}_latent_vector-{self.latent_size}.pt")
+                torch.save(self.latent, f"{self.data_path}/latent_vector-{self.latent_size}.pt")
 
     def validation_step(self, batch, batch_idx):
         points, target, idxs = batch
