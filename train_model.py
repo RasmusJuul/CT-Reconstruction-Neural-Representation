@@ -20,7 +20,7 @@ import wandb
 
 from src import _PATH_DATA, _PATH_MODELS, _PROJECT_ROOT
 from src.dataloaders import CTDataModule, ImagefitDataModule
-from src.models.mlp import MLP, MLP_2d
+from src.models.mlp import MLP, MLP_2d, NeuralField
 from src import get_device
 
 torch._dynamo.config.suppress_errors = True
@@ -34,10 +34,16 @@ def main(args_dict):
         num_volumes = len(pd.read_csv(f"{_PATH_DATA}/{args_dict['general']['data_path']}/train.csv", header=0).img_path.to_list())
         datamodule = ImagefitDataModule(args_dict)
         projection_shape = None
-        model = MLP(args_dict, 
-                projection_shape=projection_shape,
-                num_volumes=num_volumes,
-               )
+        if args_dict['model']['model_type'] == 'neuralfield':
+            model = NeuralField(args_dict, 
+                    projection_shape=projection_shape,
+                    num_volumes=num_volumes,
+                   )
+        else:
+            model = MLP(args_dict, 
+                    projection_shape=projection_shape,
+                    num_volumes=num_volumes,
+                   )
     else:
         if os.path.exists(f"{_PATH_DATA}/{args_dict['general']['data_path']}_latent_vector-{args_dict['model']['latent_size']}.pt"):
             latent_vector = torch.load(f"{_PATH_DATA}/{args_dict['general']['data_path']}_latent_vector-{args_dict['model']['latent_size']}.pt").cuda()
@@ -48,13 +54,22 @@ def main(args_dict):
         projection_shape = np.load(f"{_PATH_DATA}/{args_dict['general']['data_path']}_projections.npy").shape
         datamodule = CTDataModule(args_dict)
         num_volumes = len(pd.read_csv(f"{_PATH_DATA}/synthetic_fibers/train.csv", header=0).img_path.to_list())
-        model = MLP(args_dict, 
-                projection_shape=projection_shape,
-                num_volumes=num_volumes,
-                latent=latent_vector,
-               )
 
-    if args_dict['general']['checkpoint_path'] != None:
+        
+        if args_dict['model']['model_type'] == 'neuralfield':
+            model = NeuralField(args_dict, 
+                    projection_shape=projection_shape,
+                    num_volumes=num_volumes,
+                    latent=latent_vector,
+                   )
+        else:
+            model = MLP(args_dict, 
+                    projection_shape=projection_shape,
+                    num_volumes=num_volumes,
+                    latent=latent_vector,
+                   )
+
+    if args_dict['general']['weights_only'] and args_dict['general']['checkpoint_path'] != None:
         model.load_state_dict(torch.load(f"{_PATH_MODELS}/{args_dict['general']['checkpoint_path']}", map_location=None)['state_dict'], strict=True)
     
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
@@ -134,18 +149,17 @@ def main(args_dict):
             
         )
 
-    # if args_dict['general']['checkpoint_path'] != None:
-    #     trainer.fit(
-    #         model,
-    #         datamodule=datamodule,
-    #         ckpt_path=f"{_PATH_MODELS}/{args_dict['general']['checkpoint_path']}",
-    #     )
-    # else:
-    trainer.fit(
-        model,
-        datamodule=datamodule,
-        # ckpt_path=f"{_PATH_MODELS}/{args_dict['general']['checkpoint_path']}",
-    )
+    if not args_dict['general']['weights_only'] and args_dict['general']['checkpoint_path'] != None:
+        trainer.fit(
+            model,
+            datamodule=datamodule,
+            ckpt_path=f"{_PATH_MODELS}/{args_dict['general']['checkpoint_path']}",
+        )
+    else:
+        trainer.fit(
+            model,
+            datamodule=datamodule,
+        )
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description='CT reconstruction')
@@ -155,6 +169,7 @@ if __name__=="__main__":
     parser_general.add_argument('--data-path', type=str, default='walnut_small_angle/walnut_small', help='Path to data')
     parser_general.add_argument('--checkpoint-path', type=str, default=None, help='Path to checkpoint to continue training from')
     parser_general.add_argument('--seed', type=int, default=42, help='set seed')
+    parser_general.add_argument('--weights-only', action='store_true', help='only loads weights from checkpoint')
     
     parser_training = parser.add_argument_group('Training')
     parser_training.add_argument('--num-epochs', type=int, default=100, help='Number of epochs to train')
@@ -173,7 +188,7 @@ if __name__=="__main__":
     parser_model = parser.add_argument_group('Model')
     
     # Shared arguments for all models
-    parser_model.add_argument('--model-type', type=str, default='mlp', choices=['mlp']
+    parser_model.add_argument('--model-type', type=str, default='mlp', choices=['mlp','neuralfield']
                                     ,help='Type of model to use')
     # Arguments for MLP model
     parser_model.add_argument('--num-hidden-layers', type=int, default=4, help='Number of layers in the MLP model')
@@ -193,6 +208,7 @@ if __name__=="__main__":
             "data_path": args.data_path,
             "seed": args.seed,
             "checkpoint_path": args.checkpoint_path,
+            "weights_only": args.weights_only,
             
         },
         "training": {
