@@ -16,3 +16,4 @@ wandb/
 *.ipynb
 submit.sh
 *.mp4
+notebooks/interpolations_images/
