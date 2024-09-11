@@ -21,44 +21,9 @@ source ../envs/renner/bin/activate
 # Options
 # Run main.py --help to get options
 
-# Hashgrid encoder
 
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_small_angle/walnut_small --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 512 --noisy-points --regularization-weight 1e-3 --encoder hashgrid
-
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_small_angle/walnut_small --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 512 --noisy-points --regularization-weight 1e-3 --noise-level 0.03 --encoder hashgrid
-
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_small_angle/walnut_small --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 512 --noisy-points --regularization-weight 1e-2 --noise-level 0.03 --encoder hashgrid
-
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_small_angle/walnut_small --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 256 --noisy-points --regularization-weight 1e-3 --noise-level 0.03 --encoder hashgrid
-
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_small_angle/walnut_small --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 512 --noisy-points --regularization-weight 1e-3 --noise-level 0.06 --encoder hashgrid
-
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_small_angle/walnut_small --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 512 --noisy-points --regularization-weight 1e-2 --noise-level 0.06 --encoder hashgrid
-
-# frequency encoder
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_small_angle/walnut_small --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 512 --noisy-points --regularization-weight 1e-3 --encoder frequency
-
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_small_angle/walnut_small --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 512 --noisy-points --regularization-weight 1e-3 --noise-level 0.03 --encoder frequency
-
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_small_angle/walnut_small --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 512 --noisy-points --regularization-weight 1e-2 --noise-level 0.03 --encoder frequency
-
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_small_angle/walnut_small --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 256 --noisy-points --regularization-weight 1e-3 --noise-level 0.03 --encoder frequency
-
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_small_angle/walnut_small --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 512 --noisy-points --regularization-weight 1e-3 --noise-level 0.06 --encoder frequency
-
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_small_angle/walnut_small --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 512 --noisy-points --regularization-weight 1e-2 --noise-level 0.06 --encoder frequency
-
-# Big walnut
-
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_angle/walnut --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 512 --noisy-points --regularization-weight 1e-2
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_angle/walnut --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 512 --noisy-points --regularization-weight 5e-2 --noise-level 0.03
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_angle/walnut --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 512 --noisy-points --regularization-weight 5e-3 --noise-level 0.03
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_angle/walnut --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 512 --noisy-points --regularization-weight 1e-2 --noise-level 0.03
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_angle/walnut --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 256 --noisy-points --regularization-weight 1e-3 --noise-level 0.03
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_angle/walnut --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 512 --noisy-points --regularization-weight 1e-3 --noise-level 0.06
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name walnut --data-path walnut_angle/walnut --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 2048 --num-workers 16 --num-points 512 --noisy-points --regularization-weight 1e-2 --noise-level 0.06
+TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name imagefit_pancreas --data-path Task07_Pancreas --imagefit-mode --activation-function sine --model-lr 1e-5 --latent-lr 1e-3 --num-epochs 10000 --batch-size 10 --num-workers 16 --volume-sidelength 512 512 100 --latent-size 128 --num-hidden-features 512 --num-hidden-layers 6
 
 
-TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name imagefit --data-path synthetic_fibers --imagefit-mode --model-type mlp --activation-function sine --learning-rate 1e-4 --num-epochs 1000 --batch-size 30 --num-workers 16 --encoder hashgrid --volume-sidelength 300 --latent-size 256
 
 

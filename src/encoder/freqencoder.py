@@ -3,10 +3,16 @@ import torch.nn as nn
 
 
 class FreqEncoder(nn.Module):
-    def __init__(self, input_dim, max_freq_log2, N_freqs,
-                 log_sampling=True, include_input=True,
-                 periodic_fns=(torch.sin, torch.cos)):
-    
+    def __init__(
+        self,
+        input_dim,
+        max_freq_log2,
+        N_freqs,
+        log_sampling=True,
+        include_input=True,
+        periodic_fns=(torch.sin, torch.cos),
+    ):
+
         super().__init__()
 
         self.input_dim = input_dim
@@ -20,9 +26,9 @@ class FreqEncoder(nn.Module):
         self.output_dim += self.input_dim * N_freqs * len(self.periodic_fns)
 
         if log_sampling:
-            self.freq_bands = 2. ** torch.linspace(0., max_freq_log2, N_freqs)
+            self.freq_bands = 2.0 ** torch.linspace(0.0, max_freq_log2, N_freqs)
         else:
-            self.freq_bands = torch.linspace(2. ** 0., 2. ** max_freq_log2, N_freqs)
+            self.freq_bands = torch.linspace(2.0**0.0, 2.0**max_freq_log2, N_freqs)
 
         self.freq_bands = self.freq_bands.numpy().tolist()
 
@@ -38,6 +44,5 @@ class FreqEncoder(nn.Module):
                 out.append(p_fn(input * freq))
 
         out = torch.cat(out, dim=-1)
-
 
         return out

@@ -18,3 +18,4 @@ source ../envs/renner/bin/activate
 # Run main.py --help to get options
 
 python3 create_data.py
+
