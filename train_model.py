@@ -5,6 +5,7 @@ import datetime
 import argparse
 import numpy as np
 import pandas as pd
+import h5py
 
 import torch
 import torch._dynamo
@@ -20,7 +21,7 @@ import wandb
 
 from src import _PATH_DATA, _PATH_MODELS, _PROJECT_ROOT
 from src.dataloaders import CTDataModule, ImagefitDataModule
-from src.models.mlp import MLP_2d, NeuralField, NeuralFieldSingle
+from src.models.mlp import NeuralField, NeuralFieldSingle, NeuralField_adversarial
 from src import get_device
 
 torch._dynamo.config.suppress_errors = True
@@ -32,18 +33,31 @@ def main(args_dict):
     time = str(datetime.datetime.now())[:-10].replace(" ", "-").replace(":", "")
 
     if args_dict["training"]["imagefit_mode"]:
-        num_volumes = len(
-            pd.read_csv(
-                f"{_PATH_DATA}/{args_dict['general']['data_path']}/train.csv", header=0
-            ).file_path.to_list()
-        )
+        if ".hdf5" in args_dict['general']['data_path']:
+            if "/tmp/" in args_dict['general']['data_path']:
+                num_volumes = h5py.File(f"{args_dict['general']['data_path']}", "r")["volumes"].shape[0]
+            else:
+                num_volumes = h5py.File(f"{_PATH_DATA}/{args_dict['general']['data_path']}", "r")["volumes"].shape[0]
+        else:
+            num_volumes = len(
+                pd.read_csv(
+                    f"{_PATH_DATA}/{args_dict['general']['data_path']}/train.csv", header=0
+                ).file_path.to_list()
+            )
         datamodule = ImagefitDataModule(args_dict)
         projection_shape = None
-        model = NeuralField(
-            args_dict,
-            projection_shape=projection_shape,
-            num_volumes=num_volumes,
-        )
+        if args_dict["training"]["adversarial_mode"]:
+            model = NeuralField_adversarial(
+                args_dict,
+                projection_shape=projection_shape,
+                num_volumes=num_volumes,
+            )
+        else:
+            model = NeuralField(
+                args_dict,
+                projection_shape=projection_shape,
+                num_volumes=num_volumes,
+            )
     else:
         if os.path.exists(
             f"{_PATH_DATA}/{args_dict['general']['data_path']}_latent_vector-{args_dict['model']['latent_size']}.pt"
@@ -80,13 +94,22 @@ def main(args_dict):
         args_dict["general"]["weights_only"]
         and args_dict["general"]["checkpoint_path"] != None
     ):
-        model.load_state_dict(
+        if args_dict["training"]["adversarial_mode"]:
+            model.load_state_dict(
             torch.load(
                 f"{_PATH_MODELS}/{args_dict['general']['checkpoint_path']}",
                 map_location=None,
             )["state_dict"],
-            strict=True,
-        )
+            strict=False,
+            )
+        else:
+            model.load_state_dict(
+                torch.load(
+                    f"{_PATH_MODELS}/{args_dict['general']['checkpoint_path']}",
+                    map_location=None,
+                )["state_dict"],
+                strict=True,
+            )
 
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
 
@@ -129,7 +152,7 @@ def main(args_dict):
             callbacks=[checkpoint_callback, lr_monitor],
             log_every_n_steps=10,
             logger=wandb_logger,
-            strategy="ddp",
+            strategy="ddp_find_unused_parameters_true",
             num_sanity_val_steps=0,
             check_val_every_n_epoch=10000000,
             limit_val_batches=0,
@@ -145,7 +168,7 @@ def main(args_dict):
 
         checkpoint_callback = ModelCheckpoint(
             dirpath=f"{_PATH_MODELS}/{args_dict['general']['experiment_name']}_{args_dict['model']['encoder']}_{args_dict['model']['activation_function']}_regularization-weight-{args_dict['training']['regularization_weight']}_noise-level-{args_dict['training']['noise_level']}_latent-size-{args_dict['model']['latent_size']}-{time}",
-            filename="MLP-{epoch}",
+            filename="{epoch}",
             monitor="train/loss",
             mode="min",
             save_top_k=1,
@@ -248,6 +271,11 @@ if __name__ == "__main__":
         help="If true train both given latent vector and model parameters. Does nothing if imagefit-mode is on",
     )
     parser_training.add_argument(
+        "--adversarial",
+        action="store_true",
+        help="Train a discriminator as an adversarial loss for the latent space",
+    )
+    parser_training.add_argument(
         "--noisy-points",
         action="store_true",
         help="Whether or not to add noise to the point",
@@ -316,7 +344,7 @@ if __name__ == "__main__":
         type=int,
         nargs="+",
         default=(300, 300, 300),
-        help="Side lengths of the volume, to be trained on",
+        help="Side lengths of the volume, to be trained on. Most be 3 values seperated by a space e.g. 256 256 256",
     )
 
     args = parser.parse_args()
@@ -346,6 +374,7 @@ if __name__ == "__main__":
             "regularization_weight": args.regularization_weight,
             "noise_level": args.noise_level,
             "full_mode": args.full_mode,
+            "adversarial_mode": args.adversarial,
         },
         "model": {
             "model_type": args.model_type,

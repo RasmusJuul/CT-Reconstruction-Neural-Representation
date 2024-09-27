@@ -1,5 +1,7 @@
 import os
-import torch
+from torch import device
+from torch.cuda import is_available as is_cuda_available
+
 
 _SRC_ROOT = os.path.dirname(__file__)  # root of test folder
 _PROJECT_ROOT = os.path.dirname(_SRC_ROOT)  # root of project
@@ -8,9 +10,7 @@ _PATH_MODELS = os.path.join(_PROJECT_ROOT, "checkpoints_")  # root of models
 
 
 def get_device():
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        return torch.device("mps")
+    if is_cuda_available():
+        return device("cuda")
     else:
-        return torch.device("cpu")
+        return device("cpu")

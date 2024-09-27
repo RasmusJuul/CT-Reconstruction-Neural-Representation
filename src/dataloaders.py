@@ -362,10 +362,18 @@ class CTDataModule(pl.LightningDataModule):
 class Imagefit(torch.utils.data.Dataset):
     def __init__(self, args_dict, split="train"):
 
-        self.file_path = f"{_PATH_DATA}/{args_dict['general']['data_path']}"
-        files = pd.read_csv(f"{self.file_path}/{split}.csv", header=0)
+        if "/tmp/" in args_dict['general']['data_path']:
+            self.file_path = f"{args_dict['general']['data_path']}"
+        else:
+            self.file_path = f"{_PATH_DATA}/{args_dict['general']['data_path']}"
 
-        self.image_paths = files.file_path.to_list()
+        if ".hdf5" in self.file_path:
+            self.number_of_volumes = h5py.File(f"{self.file_path}", "r")["volumes"].shape[0]
+        else:
+            files = pd.read_csv(f"{self.file_path}/{split}.csv", header=0)
+            self.image_paths = files.file_path.to_list()
+            self.number_of_volumes = len(self.image_paths)
+            
         self.volume_sidelength = args_dict["model"]["volume_sidelength"]
 
         self.mgrid = torch.stack(
@@ -381,7 +389,7 @@ class Imagefit(torch.utils.data.Dataset):
         self.dataset = None
 
     def __len__(self):
-        return len(self.image_paths) * self.mgrid.shape[2]
+        return self.number_of_volumes * self.mgrid.shape[2]
 
     def __getitem__(self, idx):
         img_idx = idx // self.mgrid.shape[2]
@@ -406,15 +414,20 @@ class Imagefit(torch.utils.data.Dataset):
             self.volume_sidelength[0],
             self.volume_sidelength[1],
             *idx.shape,
-            dtype=torch.uint8,
+            dtype=torch.float32,
         )
         if self.dataset is None:
-            self.dataset = h5py.File(f"{self.file_path}/train.hdf5", "r")["volumes"]
+            if ".hdf5" in self.file_path:
+                self.dataset = h5py.File(f"{self.file_path}", "r")["volumes"]
+            else:
+                self.dataset = h5py.File(f"{self.file_path}/train_small.hdf5", "r")["volumes"]
 
         for img_idx in img_idxs.unique():
             temp = torch.tensor(
                 self.dataset[img_idx][:, :, grid_idxs[img_idxs == img_idx]]
             )
+            if temp.dtype != torch.float32:
+                temp = temp.to(dtype=torch.float32)
             if len(temp.shape) < 3:
                 temp = temp.unsqueeze(dim=-1)
             targets[:, :, img_idxs == img_idx] = temp
