@@ -58,6 +58,16 @@ def main(args_dict):
                 projection_shape=projection_shape,
                 num_volumes=num_volumes,
             )
+    elif args_dict["training"]["no_latent"]:
+        projection_shape = np.load(
+            f"{_PATH_DATA}/{args_dict['general']['data_path']}_projections.npy"
+        ).shape
+        datamodule = CTDataModule(args_dict)
+
+        model = NeuralFieldSingle(
+            args_dict,
+            projection_shape=projection_shape,
+        )
     else:
         if os.path.exists(
             f"{_PATH_DATA}/{args_dict['general']['data_path']}_latent_vector-{args_dict['model']['latent_size']}.pt"
@@ -141,24 +151,44 @@ def main(args_dict):
             check_on_train_epoch_end=True,
             check_finite=True,
         )
-        trainer = Trainer(
-            max_epochs=args_dict["training"]["num_epochs"],
-            devices=-1,
-            accelerator="gpu",
-            deterministic=False,
-            default_root_dir=_PROJECT_ROOT,
-            precision="16-mixed",
-            # callbacks=[checkpoint_callback, early_stopping_callback,lr_monitor],
-            callbacks=[checkpoint_callback, lr_monitor],
-            log_every_n_steps=10,
-            logger=wandb_logger,
-            strategy="ddp_find_unused_parameters_true",
-            num_sanity_val_steps=0,
-            check_val_every_n_epoch=10000000,
-            limit_val_batches=0,
-            accumulate_grad_batches=1,
-            # profiler=profiler,
-        )
+        if args_dict["training"]["adversarial_mode"]:
+            trainer = Trainer(
+                max_epochs=args_dict["training"]["num_epochs"],
+                devices=-1,
+                accelerator="gpu",
+                deterministic=False,
+                default_root_dir=_PROJECT_ROOT,
+                precision="16-mixed",
+                # callbacks=[checkpoint_callback, early_stopping_callback,lr_monitor],
+                callbacks=[checkpoint_callback, lr_monitor],
+                log_every_n_steps=10,
+                logger=wandb_logger,
+                strategy="ddp_find_unused_parameters_true",
+                num_sanity_val_steps=0,
+                check_val_every_n_epoch=10000000,
+                limit_val_batches=0,
+                accumulate_grad_batches=1,
+                # profiler=profiler,
+            )
+        else:
+            trainer = Trainer(
+                max_epochs=args_dict["training"]["num_epochs"],
+                devices=-1,
+                accelerator="gpu",
+                deterministic=False,
+                default_root_dir=_PROJECT_ROOT,
+                precision="16-mixed",
+                # callbacks=[checkpoint_callback, early_stopping_callback,lr_monitor],
+                callbacks=[checkpoint_callback, lr_monitor],
+                log_every_n_steps=10,
+                logger=wandb_logger,
+                strategy="ddp",
+                num_sanity_val_steps=0,
+                check_val_every_n_epoch=10000000,
+                limit_val_batches=0,
+                accumulate_grad_batches=1,
+                # profiler=profiler,
+            )
     else:
         wandb_logger = WandbLogger(
             project="Renner",
@@ -175,22 +205,38 @@ def main(args_dict):
             save_last=True,
             auto_insert_metric_name=True,
         )
-
-        trainer = Trainer(
-            max_epochs=args_dict["training"]["num_epochs"],
-            devices=-1,
-            accelerator="gpu",
-            deterministic=False,
-            default_root_dir=_PROJECT_ROOT,
-            precision="16-mixed",
-            callbacks=[checkpoint_callback, lr_monitor],
-            log_every_n_steps=10,
-            logger=wandb_logger,
-            strategy="ddp_find_unused_parameters_true",
-            num_sanity_val_steps=-1,
-            check_val_every_n_epoch=1,
-            # profiler=profiler,
-        )
+        if args_dict["training"]["adversarial_mode"]:
+            trainer = Trainer(
+                max_epochs=args_dict["training"]["num_epochs"],
+                devices=-1,
+                accelerator="gpu",
+                deterministic=False,
+                default_root_dir=_PROJECT_ROOT,
+                precision="16-mixed",
+                callbacks=[checkpoint_callback, lr_monitor],
+                log_every_n_steps=10,
+                logger=wandb_logger,
+                strategy="ddp_find_unused_parameters_true",
+                num_sanity_val_steps=-1,
+                check_val_every_n_epoch=1,
+                # profiler=profiler,
+            )
+        else:
+            trainer = Trainer(
+                max_epochs=args_dict["training"]["num_epochs"],
+                devices=-1,
+                accelerator="gpu",
+                deterministic=False,
+                default_root_dir=_PROJECT_ROOT,
+                precision="16-mixed",
+                callbacks=[checkpoint_callback, lr_monitor],
+                log_every_n_steps=10,
+                logger=wandb_logger,
+                strategy="ddp",
+                num_sanity_val_steps=-1,
+                check_val_every_n_epoch=1,
+                # profiler=profiler,
+            )
 
     if (
         not args_dict["general"]["weights_only"]
@@ -292,6 +338,11 @@ if __name__ == "__main__":
         default=None,
         help="constant which will be multiplied by gaussian noise with 0 mean and std of the mean value of the projections",
     )
+    parser_training.add_argument(
+        "--no-latent",
+        action="store_true",
+        help="train a network without latent vectors",
+    )
 
     parser_model = parser.add_argument_group("Model")
 
@@ -320,7 +371,7 @@ if __name__ == "__main__":
         "--encoder",
         type=str,
         default=None,
-        choices=["hashgrid", "frequency"],
+        choices=["hashgrid", "frequency", "spherical"],
         help="Encoder used in the MLP model",
     )
     parser_model.add_argument(
@@ -375,6 +426,7 @@ if __name__ == "__main__":
             "noise_level": args.noise_level,
             "full_mode": args.full_mode,
             "adversarial_mode": args.adversarial,
+            "no_latent": args.no_latent,
         },
         "model": {
             "model_type": args.model_type,

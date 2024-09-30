@@ -78,7 +78,7 @@ def compute_projection_values(
 class NeuralFieldSingle(LightningModule):
 
     def __init__(self, args_dict, projection_shape=(300, 300)):
-        super(MLP, self).__init__()
+        super(NeuralFieldSingle, self).__init__()
         self.save_hyperparameters()
 
         self.projection_shape = projection_shape
@@ -95,65 +95,93 @@ class NeuralFieldSingle(LightningModule):
         self.num_hidden_features = args_dict["model"]["num_hidden_features"]
         self.activation_function = args_dict["model"]["activation_function"]
 
-        # Initialising encoder
-        if args_dict["model"]["encoder"] != None:
-            self.encoder = get_encoder(encoding=args_dict["model"]["encoder"])
-            num_input_features = self.encoder.output_dim
-        else:
-            self.encoder = None
-            num_input_features = 3  # x,y,z coordinate
-
-        layers_first_half = []
-        layers_second_half = []
-        for i in range(self.num_hidden_layers):
-            if i % 2 == 0:
-                layers_first_half.append(
-                    torch.nn.Sequential(
-                        torch.nn.Linear(
-                            self.num_hidden_features, self.num_hidden_features
-                        ),
-                        get_activation_function(self.activation_function, args_dict),
-                        torch.nn.Dropout(p=0.2),
-                    )
-                )
-            else:
-                layers_second_half.append(
-                    torch.nn.Sequential(
-                        torch.nn.Linear(
-                            self.num_hidden_features, self.num_hidden_features
-                        ),
-                        get_activation_function(self.activation_function, args_dict),
-                        torch.nn.Dropout(p=0.2),
-                    )
-                )
-
-        self.mlp_first_half = torch.nn.Sequential(
-            torch.nn.Linear(num_input_features, self.num_hidden_features),
-            get_activation_function(self.activation_function, args_dict),
-            *layers_first_half,
-        )
-        self.mlp_second_half = torch.nn.Sequential(
-            torch.nn.Linear(
-                self.num_hidden_features + num_input_features, self.num_hidden_features
-            ),
-            get_activation_function(self.activation_function, args_dict),
-            *layers_second_half,
-            torch.nn.Linear(self.num_hidden_features, 1),
-            torch.nn.Sigmoid(),
-        )
-
-        if self.activation_function == "sine":
-            self.mlp_first_half.apply(sine_init)
-            self.mlp_second_half.apply(sine_init)
-            self.mlp_first_half[0].apply(first_layer_sine_init)
-
-        self.params = torch.nn.ModuleDict(
-            {
-                "model": torch.nn.ModuleList(
-                    [self.encoder, self.mlp_first_half, self.mlp_second_half]
-                )
+        config = {
+            "encoding_hashgrid": {
+                "otype": "HashGrid",
+                "n_levels": 16,
+                "n_features_per_level": 2,
+                "log2_hashmap_size": 19,
+                "base_resolution": 16,
+                "per_level_scale": 1.5
+            },
+            "encoding_spherical": {
+                "otype": "SphericalHarmonics",
+            	"degree": 4
+            },
+            "network": {
+                "otype": "FullyFusedMLP",
+                "activation": "ReLU",
+                "output_activation": "Sigmoid",
+                "n_neurons": 128,
+                "n_hidden_layers": 6
             }
+        }
+
+        self.model = tcnn.NetworkWithInputEncoding(
+            n_input_dims=3, n_output_dims=1,
+            encoding_config=config[f"encoding_{args_dict['model']['encoder']}"], 
+            network_config=config["network"],
         )
+        
+        # # Initialising encoder
+        # if args_dict['model']['encoder'] != None:
+        #     self.encoder = tcnn.Encoding(n_input_dims=3, encoding_config=config[f"encoding_{args_dict['model']['encoder']}"])
+        #     num_input_features = self.encoder.n_output_dims
+        # else:
+        #     self.encoder = None
+        #     num_input_features = 3  # x,y,z coordinate
+
+        # layers_first_half = []
+        # layers_second_half = []
+        # for i in range(self.num_hidden_layers):
+        #     if i % 2 == 0:
+        #         layers_first_half.append(
+        #             torch.nn.Sequential(
+        #                 torch.nn.Linear(
+        #                     self.num_hidden_features, self.num_hidden_features
+        #                 ),
+        #                 get_activation_function(self.activation_function, args_dict),
+        #                 torch.nn.Dropout(p=0.2),
+        #             )
+        #         )
+        #     else:
+        #         layers_second_half.append(
+        #             torch.nn.Sequential(
+        #                 torch.nn.Linear(
+        #                     self.num_hidden_features, self.num_hidden_features
+        #                 ),
+        #                 get_activation_function(self.activation_function, args_dict),
+        #                 torch.nn.Dropout(p=0.2),
+        #             )
+        #         )
+
+        # self.mlp_first_half = torch.nn.Sequential(
+        #     torch.nn.Linear(num_input_features, self.num_hidden_features),
+        #     get_activation_function(self.activation_function, args_dict),
+        #     *layers_first_half,
+        # )
+        # self.mlp_second_half = torch.nn.Sequential(
+        #     torch.nn.Linear(
+        #         self.num_hidden_features + num_input_features, self.num_hidden_features
+        #     ),
+        #     get_activation_function(self.activation_function, args_dict),
+        #     *layers_second_half,
+        #     torch.nn.Linear(self.num_hidden_features, 1),
+        #     torch.nn.Sigmoid(),
+        # )
+
+        # if self.activation_function == "sine":
+        #     self.mlp_first_half.apply(sine_init)
+        #     self.mlp_second_half.apply(sine_init)
+        #     self.mlp_first_half[0].apply(first_layer_sine_init)
+
+        # self.params = torch.nn.ModuleDict(
+        #     {
+        #         "model": torch.nn.ModuleList(
+        #             [self.encoder, self.mlp_first_half, self.mlp_second_half]
+        #         )
+        #     }
+        # )
 
         self.loss_fn = torch.nn.MSELoss()
         self.volumefit_loss = torch.nn.L1Loss()
@@ -161,14 +189,31 @@ class NeuralFieldSingle(LightningModule):
         self.psnr = tm.image.PeakSignalNoiseRatio()
         self.validation_step_outputs = []
         self.validation_step_gt = []
-        self.TV_regularization = tm.image.TotalVariance()
-
-        self.random_sample_idx = np.random.randint(self.num_volumes)
-        self.prediction_img = []
-        self.gt_img = []
 
         self.smallest_train_loss = torch.inf
         self.train_epoch_loss = 0
+
+    # def forward(self, pts):
+    #     pts_shape = pts.shape
+
+    #     if len(pts.shape) > 2:
+    #         pts = pts.view(-1, 3)
+
+    #     if self.encoder != None:
+    #         enc = self.encoder(pts)
+    #     else:
+    #         enc = pts
+
+    #     out = self.mlp_first_half(enc)
+
+    #     inputs2 = torch.cat([enc, out], dim=1)
+
+    #     out = self.mlp_second_half(inputs2)
+
+    #     if len(pts_shape) > 2:
+    #         out = out.view(*pts_shape[:-1], -1)
+
+    #     return out
 
     def forward(self, pts):
         pts_shape = pts.shape
@@ -176,16 +221,7 @@ class NeuralFieldSingle(LightningModule):
         if len(pts.shape) > 2:
             pts = pts.view(-1, 3)
 
-        if self.encoder != None:
-            enc = self.encoder(pts)
-        else:
-            enc = pts
-
-        out = self.mlp_first_half(enc)
-
-        inputs2 = torch.cat([enc, out], dim=1)
-
-        out = self.mlp_second_half(inputs2)
+        out = self.model(pts)
 
         if len(pts_shape) > 2:
             out = out.view(*pts_shape[:-1], -1)
@@ -325,9 +361,9 @@ class NeuralFieldSingle(LightningModule):
 
     def configure_optimizers(self):
 
-        lr_lambda = lambda epoch: 0.98 ** max(0, (epoch - 50))
+        lr_lambda = lambda epoch: 0.99 ** max(0, (epoch - 50))
         optimizer = torch.optim.AdamW(
-            self.params.model.parameters(), lr=self.model_lr, amsgrad=True
+            self.model.parameters(), lr=self.model_lr, amsgrad=True
         )
 
         lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
@@ -384,7 +420,7 @@ class NeuralField(LightningModule):
             "encoding_spherical": {
                 "otype": "SphericalHarmonics",
             	"degree": 4
-            }
+            },
             "network": {
                 "otype": "FullyFusedMLP",
                 "activation": "ReLU",
@@ -395,7 +431,7 @@ class NeuralField(LightningModule):
         }
         
         # Initialising encoder
-        if args_dict["model"]["encoder"] != None:
+        if args_dict['model']['encoder'] != None:
             # self.encoder = get_encoder(encoding=args_dict["model"]["encoder"],
             #                            input_dim=3,
             #                            multires=6,
@@ -405,7 +441,7 @@ class NeuralField(LightningModule):
             #                            base_resolution=16,
             #                            log2_hashmap_size=23,)
             # num_input_features = self.encoder.output_dim + self.latent_size
-            self.encoder = tcnn.Encoding(n_input_dims=3, encoding_config=config[f"encoding_{args_dict["model"]["encoder"]}"])
+            self.encoder = tcnn.Encoding(n_input_dims=3, encoding_config=config[f"encoding_{args_dict['model']['encoder']}"])
             num_input_features = self.encoder.n_output_dims + self.latent_size
         else:
             self.encoder = None
