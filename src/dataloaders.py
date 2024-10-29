@@ -28,6 +28,18 @@ def collate_fn_imagefit(batch):
     return points, targets, img_idxs
 
 
+def collate_fn_raygan(batch):
+    points = batch[0]
+    targets = batch[1]
+    position = batch[2]
+    start_points = batch[3]
+    end_points = batch[4]
+    real_ray = batch[5]
+    real_position = batch[6]
+    real_start_points = batch[7]
+    real_end_points = batch[8]
+    return points, targets, position, start_points, end_points, real_ray, real_position, real_start_points, real_end_points
+
 class Geometry(torch.nn.Module):
     def __init__(
         self,
@@ -74,7 +86,6 @@ class Geometry(torch.nn.Module):
         self.detector_pos[0] /= self.object_shape[0] / 2
         self.detector_pos[1] /= self.object_shape[1] / 2
         self.detector_pos[2] /= self.object_shape[2] / 2
-        # self.detector_pos -= torch.tensor([0,0,10])
 
         self.u_vec[0] /= self.object_shape[0] / 2
         self.u_vec[1] /= self.object_shape[1] / 2
@@ -275,7 +286,7 @@ class CTDataModule(pl.LightningDataModule):
         args_dict,
     ):
         """
-        Initializes the BugNISTDataModule.
+        Initializes the Data Module.
 
         Parameters
         ----------
@@ -362,6 +373,226 @@ class CTDataModule(pl.LightningDataModule):
             collate_fn=collate_fn,
         )
 
+
+class CTpointsWithRays(torch.utils.data.Dataset):
+    def __init__(self, args_dict, noisy_points=False):
+
+        self.args = args_dict
+        data_path = f"{_PATH_DATA}/{self.args['general']['data_path']}"
+
+        positions = np.load(f"{data_path}_positions.npy")
+        self.projections = np.load(f"{data_path}_projections.npy")
+
+        if self.args["training"]["noise_level"] != None:
+            self.projections += (
+                np.random.normal(
+                    loc=0, scale=self.projections.mean(), size=self.projections.shape
+                )
+                * self.args["training"]["noise_level"]
+            )
+            self.projections[self.projections < 0] = 0
+
+        if "filaments_volumes" in data_path:
+            with h5py.File(f"{_PATH_DATA}/FiberDataset/filaments_volumes.hdf5", 'r') as f:
+                self.vol = torch.from_numpy(f["volumes"][int(data_path.split("_")[-1]),:,:,:]).permute(2,1,0)
+        else:
+            vol = torch.tensor(tifffile.imread(f"{data_path}.tif"))
+            vol -= vol.min()
+            vol = vol / vol.max()
+            self.vol = vol.permute(2,1,0)
+
+        self.detector_size = self.projections[0, :, :].shape
+        detector_pos = torch.tensor(positions[:, 3:6])
+        detector_pixel_size = torch.tensor(positions[:, 6:])
+
+        source_pos = torch.tensor(positions[:, :3])
+        object_shape = self.vol.shape
+
+        self.end_points = [None] * positions.shape[0]
+        self.start_points = [None] * positions.shape[0]
+        self.valid_rays = [None] * positions.shape[0]
+        self.positions = [None] * positions.shape[0]
+
+        for i in tqdm(range(positions.shape[0]), desc="Generating points from rays"):
+            geometry = Geometry(
+                source_pos[i],
+                detector_pos[i],
+                self.detector_size,
+                detector_pixel_size[i],
+                object_shape,
+            )
+            self.end_points[i] = geometry.end_points
+            self.start_points[i] = geometry.start_points
+            self.valid_rays[i] = geometry.valid_rays
+            self.positions[i] = torch.from_numpy(np.array([positions[i]] * geometry.start_points.shape[0]))
+
+        self.end_points = torch.cat(self.end_points).view(-1, 3)
+        self.start_points = torch.cat(self.start_points).view(-1, 3)
+        self.valid_rays = torch.cat(self.valid_rays)
+        self.positions = torch.cat(self.positions)
+
+        if "FiberDataset" in self.args['general']['ray_data_path']:
+            self.real_ray_path = f"{_PATH_DATA}/FiberDataset/combined_interpolated_points.hdf5"
+        else:
+            self.real_ray_path = self.args['general']['ray_data_path']
+        self.real_positions = None
+        self.real_start_points = None
+        self.real_end_points = None
+        self.real_rays = None
+        
+
+        self.noisy = noisy_points
+
+    def sample_points(self, start_points, end_points, num_points):
+        """
+        Parameters
+        ----------
+        num_points : int
+            Number of points sampled per ray
+        """
+        # Compute the step size for each ray by dividing the total distance by the number of points
+        step_size = (end_points - start_points) / (num_points - 1)
+
+        # Create a tensor 'steps' of shape (num_points, 1, 1)
+        # This tensor represents the step indices for each point along the ray
+        steps = torch.arange(num_points).unsqueeze(-1).unsqueeze(-1)
+
+        # Compute the coordinates of each point along the ray by adding the start point to the product of the step size and the step indices
+        # This uses broadcasting to perform the computation for all points and all rays at once
+        points = start_points + step_size * steps
+
+        # Permute the dimensions of the points tensor to match the expected output shape
+        return points.permute(1, 0, 2), step_size
+
+    def __len__(self):
+        return self.start_points.shape[0]
+
+    def __getitems__(self, idx):
+        end_points = self.end_points[idx]
+        start_points = self.start_points[idx]
+        position = self.positions[idx]
+        points, step_size = self.sample_points(
+            start_points, end_points, self.args["training"]["num_points"]
+        )
+        targets = torch.tensor(self.projections.flatten()[self.valid_rays][idx])
+
+        if self.noisy:
+            noise = (torch.rand(points.shape) - 0.5) * 0.5
+            points = points + (noise * step_size[:, None, :])
+            points = torch.clamp(points, -1.0, 1.0)
+
+        points = points.contiguous().to(dtype=torch.float)
+        targets = targets.contiguous().to(dtype=torch.float)
+        position = position.contiguous().to(dtype=torch.float)
+        start_points = start_points.contiguous().to(dtype=torch.float)
+        end_points = end_points.contiguous().to(dtype=torch.float)
+
+        if self.real_rays == None:
+            self.real_positions = h5py.File(self.real_ray_path, 'r')["position"]
+            self.real_start_points = h5py.File(self.real_ray_path, 'r')["start_point"]
+            self.real_end_points = h5py.File(self.real_ray_path, 'r') ["end_point"]
+            self.real_rays = h5py.File(self.real_ray_path, 'r')["ray"]
+
+        sample_idx = np.sort(np.random.choice(self.real_rays.shape[0],self.args["training"]["batch_size"],replace=False))
+        real_ray = torch.from_numpy(self.real_rays[sample_idx]).contiguous().to(dtype=torch.float)
+        real_position = torch.from_numpy(self.real_positions[sample_idx]).contiguous().to(dtype=torch.float)
+        real_start_points = torch.from_numpy(self.real_start_points[sample_idx]).contiguous().to(dtype=torch.float)
+        real_end_points = torch.from_numpy(self.real_end_points[sample_idx]).contiguous().to(dtype=torch.float)
+        
+        return points, targets, position, start_points, end_points, real_ray, real_position, real_start_points, real_end_points
+
+class CTRayDataModule(pl.LightningDataModule):
+    def __init__(
+        self,
+        args_dict,
+    ):
+        """
+        Initializes the Data Module.
+
+        Parameters
+        ----------
+        args_dict : Dict
+            Dictionary with arguments
+        """
+        super().__init__()
+        self.args = args_dict
+        self.batch_size = self.args["training"]["batch_size"]
+
+    def setup(self, stage=None):
+        """
+        Setup datasets for different stages (e.g., 'fit', 'test').
+
+        Args:
+        - stage (str, optional): The stage for which data needs to be set up. Defaults to None.
+        """
+        if stage == "fit" or stage is None:
+            if self.args["training"]["noisy_points"]:
+                self.train_dataset = CTpointsWithRays(self.args, noisy_points=True)
+                self.validation_dataset = CTpointsWithRays(self.args, noisy_points=False)
+            else:
+                self.train_dataset = CTpointsWithRays(self.args, noisy_points=False)
+                self.validation_dataset = CTpointsWithRays(self.args, noisy_points=False)
+        elif stage == "test":
+            self.test_dataset = CTpointsWithRays(self.args, noisy_points=False)
+
+    def train_dataloader(self, shuffle=True, notebook=False):
+        """
+        Returns the training data loader.
+        """
+        if notebook:
+            return DataLoader(
+                self.train_dataset,
+                batch_size=self.batch_size,
+                num_workers=self.args["training"]["num_workers"],
+                pin_memory=True,
+                shuffle=shuffle,
+                drop_last=True,
+                collate_fn=collate_fn_raygan,
+            )
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.args["training"]["num_workers"],
+            pin_memory=True,
+            shuffle=shuffle,
+            drop_last=True,
+            persistent_workers=True,
+            prefetch_factor=5,
+            collate_fn=collate_fn_raygan,
+        )
+
+    def val_dataloader(self, notebook=False):
+        """
+        Returns the validation data loader.
+        """
+        if notebook:
+            return DataLoader(
+                self.validation_dataset,
+                batch_size=self.batch_size,
+                num_workers=self.args["training"]["num_workers"],
+                pin_memory=True,
+                collate_fn=collate_fn_raygan,
+            )
+        return DataLoader(
+            self.validation_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.args["training"]["num_workers"],
+            pin_memory=True,
+            prefetch_factor=5,
+            collate_fn=collate_fn_raygan,
+        )
+
+    def test_dataloader(self):
+        """
+        Returns the test data loader.
+        """
+        return DataLoader(
+            self.test_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.args["training"]["num_workers"],
+            pin_memory=True,
+            collate_fn=collate_fn_raygan,
+        )
 
 class Imagefit(torch.utils.data.Dataset):
     def __init__(self, args_dict, split="train"):
