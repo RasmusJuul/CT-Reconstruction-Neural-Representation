@@ -16,3 +16,4 @@ wandb/
 *.ipynb
 submit.sh
 notebooks/interpolations_images/
+.venv/
