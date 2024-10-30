@@ -17,3 +17,4 @@ wandb/
 submit.sh
 notebooks/interpolations_images/
 .venv/
+tiny-cuda-nn/

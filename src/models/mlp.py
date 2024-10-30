@@ -10,7 +10,7 @@ import tifffile
 from tqdm import tqdm
 
 import tinycudann as tcnn
-from src.encoder import get_encoder
+
 from src import _PATH_DATA, _PATH_MODELS, _PROJECT_ROOT
 
 
@@ -422,15 +422,6 @@ class NeuralField(LightningModule):
         
         # Initialising encoder
         if args_dict['model']['encoder'] != None:
-            # self.encoder = get_encoder(encoding=args_dict["model"]["encoder"],
-            #                            input_dim=3,
-            #                            multires=6,
-            #                            degree=4,
-            #                            num_levels=16,
-            #                            level_dim=2,
-            #                            base_resolution=16,
-            #                            log2_hashmap_size=23,)
-            # num_input_features = self.encoder.output_dim + self.latent_size
             self.encoder = tcnn.Encoding(n_input_dims=3, encoding_config=config[f"encoding_{args_dict['model']['encoder']}"])
             num_input_features = self.encoder.n_output_dims + self.latent_size
         else:
@@ -883,15 +874,6 @@ class NeuralField_adversarial(LightningModule):
         
         # Initialising encoder
         if args_dict["model"]["encoder"] != None:
-            # self.encoder = get_encoder(encoding=args_dict["model"]["encoder"],
-            #                            input_dim=3,
-            #                            multires=6,
-            #                            degree=4,
-            #                            num_levels=16,
-            #                            level_dim=2,
-            #                            base_resolution=16,
-            #                            log2_hashmap_size=23,)
-            # num_input_features = self.encoder.output_dim + self.latent_size
             self.encoder = tcnn.Encoding(n_input_dims=3, encoding_config=config["encoding"])
             num_input_features = self.encoder.n_output_dims + self.latent_size
             

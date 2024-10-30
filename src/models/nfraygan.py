@@ -10,7 +10,6 @@ import tifffile
 from tqdm import tqdm
 
 import tinycudann as tcnn
-from src.encoder import get_encoder
 from src import _PATH_DATA, _PATH_MODELS, _PROJECT_ROOT
 
 
@@ -108,6 +107,10 @@ class RayGAN(LightningModule):
             "encoding_frequency": {
             	"otype": "Frequency",
             	"n_frequencies": 12              
+            },
+            "encoding_blob": {
+                "otype": "OneBlob", 
+                "n_bins": 16,
             },
         }
         

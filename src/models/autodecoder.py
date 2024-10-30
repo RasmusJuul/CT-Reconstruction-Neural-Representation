@@ -10,7 +10,6 @@ import tifffile
 from tqdm import tqdm
 
 import tinycudann as tcnn
-from src.encoder import get_encoder
 from src import _PATH_DATA, _PATH_MODELS, _PROJECT_ROOT
 
 

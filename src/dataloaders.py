@@ -580,6 +580,7 @@ class CTRayDataModule(pl.LightningDataModule):
             pin_memory=True,
             prefetch_factor=5,
             collate_fn=collate_fn_raygan,
+            persistent_workers=True,
         )
 
     def test_dataloader(self):

@@ -87,7 +87,7 @@ def main(args_dict):
         callbacks=[checkpoint_callback, lr_monitor],
         log_every_n_steps=10,
         logger=wandb_logger,
-        strategy="ddp_find_unused_parameters_true",
+        #strategy="ddp_find_unused_parameters_true",
         num_sanity_val_steps=0,
         check_val_every_n_epoch=1,
         # profiler=profiler,
@@ -206,7 +206,7 @@ if __name__ == "__main__":
         "--encoder",
         type=str,
         default=None,
-        choices=["hashgrid", "frequency", "spherical"],
+        choices=["hashgrid", "frequency", "spherical", "blob"],
         help="Encoder used in the MLP model",
     )
     parser_model.add_argument(
