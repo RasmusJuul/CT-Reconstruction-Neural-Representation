@@ -132,7 +132,6 @@ class RayGAN(LightningModule):
                             self.num_hidden_features, self.num_hidden_features
                         ),
                         get_activation_function(self.activation_function, args_dict),
-                        torch.nn.Dropout(p=0.2),
                     )
                 )
             else:
@@ -142,7 +141,6 @@ class RayGAN(LightningModule):
                             self.num_hidden_features, self.num_hidden_features
                         ),
                         get_activation_function(self.activation_function, args_dict),
-                        torch.nn.Dropout(p=0.2),
                     )
                 )
 

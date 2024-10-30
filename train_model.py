@@ -21,7 +21,9 @@ import wandb
 
 from src import _PATH_DATA, _PATH_MODELS, _PROJECT_ROOT
 from src.dataloaders import CTDataModule, ImagefitDataModule
-from src.models.mlp import NeuralField, NeuralFieldSingle, NeuralField_adversarial
+from src.models.mlp import NeuralField
+from src.models.nfraygan import RayGAN
+from src.models.autodecoder import AutoDecoder, AutoDecoder_adversarial
 from src import get_device
 
 torch._dynamo.config.suppress_errors = True
@@ -47,13 +49,13 @@ def main(args_dict):
         datamodule = ImagefitDataModule(args_dict)
         projection_shape = None
         if args_dict["training"]["adversarial_mode"]:
-            model = NeuralField_adversarial(
+            model = AutoDecoder_adversarial(
                 args_dict,
                 projection_shape=projection_shape,
                 num_volumes=num_volumes,
             )
         else:
-            model = NeuralField(
+            model = AutoDecoder(
                 args_dict,
                 projection_shape=projection_shape,
                 num_volumes=num_volumes,
@@ -64,7 +66,7 @@ def main(args_dict):
         ).shape
         datamodule = CTDataModule(args_dict)
 
-        model = NeuralFieldSingle(
+        model = NeuralField(
             args_dict,
             projection_shape=projection_shape,
         )
