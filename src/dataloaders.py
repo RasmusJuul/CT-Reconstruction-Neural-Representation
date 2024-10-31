@@ -202,7 +202,7 @@ class CTpoints(torch.utils.data.Dataset):
 
         if "filaments_volumes" in data_path:
             with h5py.File(f"{_PATH_DATA}/FiberDataset/filaments_volumes.hdf5", 'r') as f:
-                self.vol = torch.from_numpy(f["volumes"][0,:,:,:])
+                self.vol = torch.from_numpy(f["volumes"][0,:,:,:]).permute(2,1,0)
         else:
             vol = torch.tensor(tifffile.imread(f"{data_path}.tif"))
             vol -= vol.min()
