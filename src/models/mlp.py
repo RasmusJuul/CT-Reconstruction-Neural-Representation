@@ -343,7 +343,7 @@ class NeuralField(LightningModule):
 
     def configure_optimizers(self):
 
-        lr_lambda = lambda epoch: 0.99 ** max(0, (epoch - 100))
+        # lr_lambda = lambda epoch: 0.99 ** max(0, (epoch - 100))
         optimizer = torch.optim.AdamW(
                 [
                     {
@@ -361,9 +361,10 @@ class NeuralField(LightningModule):
                 amsgrad=True,
             )
 
-        lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
-        lr_scheduler_config = {
-            "scheduler": lr_scheduler,
-            "interval": "epoch",
-        }
-        return {"optimizer": optimizer, "lr_scheduler": lr_scheduler_config}
+        # lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+        # lr_scheduler_config = {
+        #     "scheduler": lr_scheduler,
+        #     "interval": "epoch",
+        # }
+        # return {"optimizer": optimizer, "lr_scheduler": lr_scheduler_config}
+        return optimizer

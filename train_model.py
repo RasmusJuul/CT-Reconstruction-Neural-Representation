@@ -234,7 +234,7 @@ def main(args_dict):
                 callbacks=[checkpoint_callback, lr_monitor],
                 log_every_n_steps=10,
                 logger=wandb_logger,
-                strategy="ddp",
+                # strategy="ddp",
                 num_sanity_val_steps=-1,
                 check_val_every_n_epoch=1,
                 # profiler=profiler,

@@ -207,7 +207,7 @@ class CTpoints(torch.utils.data.Dataset):
             vol = torch.tensor(tifffile.imread(f"{data_path}.tif"))
             vol -= vol.min()
             vol = vol / vol.max()
-            self.vol = vol  # .permute(2,1,0)
+            self.vol = vol.permute(2,1,0)
 
         self.detector_size = self.projections[0, :, :].shape
         detector_pos = torch.tensor(positions[:, 3:6])
@@ -359,6 +359,7 @@ class CTDataModule(pl.LightningDataModule):
             pin_memory=True,
             prefetch_factor=5,
             collate_fn=collate_fn,
+            persistent_workers=True,
         )
 
     def test_dataloader(self):
