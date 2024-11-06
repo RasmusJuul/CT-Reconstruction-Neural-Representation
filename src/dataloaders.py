@@ -557,7 +557,7 @@ class CTRayDataModule(pl.LightningDataModule):
             pin_memory=True,
             shuffle=shuffle,
             drop_last=True,
-            persistent_workers=True,
+            # persistent_workers=True,
             prefetch_factor=5,
             collate_fn=collate_fn_raygan,
         )
@@ -581,7 +581,7 @@ class CTRayDataModule(pl.LightningDataModule):
             pin_memory=True,
             prefetch_factor=5,
             collate_fn=collate_fn_raygan,
-            persistent_workers=True,
+            # persistent_workers=True,
         )
 
     def test_dataloader(self):

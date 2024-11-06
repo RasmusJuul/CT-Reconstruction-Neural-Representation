@@ -73,6 +73,22 @@ def compute_projection_values(
 
     return attenuation_sum
 
+def gaussian(x, mean, std):
+    return torch.exp(-0.5 * ((x - mean) / std) ** 2) / (std * torch.sqrt(torch.tensor(2 * torch.pi)))
+
+class GaussianLoss(nn.Module):
+    def __init__(self, means, stds, weights):
+        super(GaussianLoss, self).__init__()
+        self.means = means
+        self.stds = stds
+        self.weights = weights
+
+    def forward(self, x):
+        loss = 0
+        for mean, std, weight in zip(self.means, self.stds, self.weights):
+            loss += weight * gaussian(x, mean, std)
+        return -torch.log(loss)  # Negative log-likelihood
+
 class RayGAN(LightningModule):
 
     def __init__(self, args_dict, projection_shape=(16, 256, 256)):
@@ -232,60 +248,76 @@ class RayGAN(LightningModule):
             attenuation_values[:, 1:], attenuation_values[:, :-1]
         )  # punish model for big changes between adjacent points (to make it smooth)
         loss += self.l1_regularization_weight * smoothness_loss
-
-        valid = torch.ones(attenuation_values.size(0), 1)
-        valid = valid.type_as(attenuation_values)
-        g_loss = self.adversarial_loss(self.Discriminator(attenuation_values,position,start_points,end_points), valid)
         
-        total_loss = loss+(1e-2 * g_loss)
+        if self.current_epoch > 5:
+            valid = torch.ones(attenuation_values.size(0), 1)
+            valid = valid.type_as(attenuation_values)
+            g_loss = self.adversarial_loss(self.Discriminator(attenuation_values,position,start_points,end_points), valid)
+            total_loss = loss+(1e-2 * g_loss)
+        else:
+            total_loss = loss
 
         self.manual_backward(total_loss)
         optimizer_g.step()
         optimizer_g.zero_grad()
         self.untoggle_optimizer(optimizer_g)
 
-        # train discriminator
-        # Measure discriminator's ability to classify real from generated samples
-        self.toggle_optimizer(optimizer_d)
+        if self.current_epoch > 5:
+            # train discriminator
+            # Measure discriminator's ability to classify real from generated samples
+            self.toggle_optimizer(optimizer_d)
+    
+            # how well can it label as real?
+            valid = torch.ones(real_ray.size(0), 1)
+            valid = valid.type_as(real_ray)
+            pred_target = self.Discriminator(real_ray,real_position,real_start_points,real_end_points)
+            real_loss = self.adversarial_loss(pred_target, valid)
+            acc_real = self.acc(pred_target, valid)
+    
+            # how well can it label as fake?
+            fake = torch.zeros(attenuation_values.size(0), 1)
+            fake = fake.type_as(attenuation_values)
+            pred_generated = self.Discriminator(attenuation_values.detach(),position,start_points,end_points)
+            fake_loss = self.adversarial_loss(pred_generated, fake)
+            acc_fake =  self.acc(pred_generated,fake)
+            
+            # discriminator loss is the average of these
+            d_loss = (real_loss + fake_loss) / 2
+            if torch.any(torch.isnan(d_loss)):
+                print("nan in d_loss")
+                raise ValueError('Nan in output')
+            self.manual_backward(d_loss)
+            optimizer_d.step()
+            optimizer_d.zero_grad()
+            self.untoggle_optimizer(optimizer_d)
 
-        # how well can it label as real?
-        valid = torch.ones(real_ray.size(0), 1)
-        valid = valid.type_as(real_ray)
-        pred_target = self.Discriminator(real_ray,real_position,real_start_points,real_end_points)
-        real_loss = self.adversarial_loss(pred_target, valid)
-        acc_real = self.acc(pred_target, valid)
 
-        # how well can it label as fake?
-        fake = torch.zeros(attenuation_values.size(0), 1)
-        fake = fake.type_as(attenuation_values)
-        pred_generated = self.Discriminator(attenuation_values.detach(),position,start_points,end_points)
-        fake_loss = self.adversarial_loss(pred_generated, fake)
-        acc_fake =  self.acc(pred_generated,fake)
-        
-        # discriminator loss is the average of these
-        d_loss = (real_loss + fake_loss) / 2
-        if torch.any(torch.isnan(d_loss)):
-            print("nan in d_loss")
-            raise ValueError('Nan in output')
-        self.manual_backward(d_loss)
-        optimizer_d.step()
-        optimizer_d.zero_grad()
-        self.untoggle_optimizer(optimizer_d)
-        
-        self.log_dict(
-                {
-                    "train/loss": loss,
-                    "train/generator_loss": g_loss,
-                    "train/total_loss": total_loss,
-                    "train/discriminator_loss": d_loss,
-                    "train/acc_fake":acc_fake,
-                    "train/acc_real":acc_real,
-                },
-                on_step=True,
-                on_epoch=True,
-                sync_dist=True,
-                batch_size=self.batch_size,
-            )
+            self.log_dict(
+                    {
+                        "train/loss": loss,
+                        "train/generator_loss": g_loss,
+                        "train/total_loss": total_loss,
+                        "train/discriminator_loss": d_loss,
+                        "train/acc_fake":acc_fake,
+                        "train/acc_real":acc_real,
+                    },
+                    on_step=True,
+                    on_epoch=True,
+                    sync_dist=True,
+                    batch_size=self.batch_size,
+                )
+
+        else:
+            self.log_dict(
+                    {
+                        "train/loss": loss,
+                        "train/total_loss": total_loss,
+                    },
+                    on_step=True,
+                    on_epoch=True,
+                    sync_dist=True,
+                    batch_size=self.batch_size,
+                )
         
         return loss
 
@@ -332,7 +364,7 @@ class RayGAN(LightningModule):
         gt = torch.zeros(self.projection_shape, dtype=all_gt.dtype)
         gt[valid_rays] = all_gt
 
-        for i in np.random.randint(0, self.projection_shape[0], 5):
+        for i in np.random.randint(0, self.projection_shape[0], 2):
             self.logger.log_image(
                 key="val/projection",
                 images=[preds[i], gt[i], (gt[i] - preds[i])],
@@ -343,7 +375,7 @@ class RayGAN(LightningModule):
             torch.meshgrid(
                 torch.linspace(-1, 1, vol_shape[0]),
                 torch.linspace(-1, 1, vol_shape[1]),
-                torch.linspace(-1, 1, vol_shape[1]),
+                torch.linspace(-1, 1, vol_shape[2]),
                 indexing="ij",
             ),
             dim=-1,
@@ -364,12 +396,12 @@ class RayGAN(LightningModule):
         self.logger.log_image(
             key="val/reconstruction",
             images=[
-                outputs[vol_shape[2] // 2, :, :],
-                vol[vol_shape[2] // 2, :, :],
-                (vol[vol_shape[2] // 2, :, :] - outputs[vol_shape[2] // 2, :, :]),
-                outputs[:, vol_shape[2] // 2, :],
-                vol[:, vol_shape[2] // 2, :],
-                (vol[:, vol_shape[2] // 2, :] - outputs[:, vol_shape[2] // 2, :]),
+                outputs[vol_shape[0] // 2, :, :],
+                vol[vol_shape[0] // 2, :, :],
+                (vol[vol_shape[0] // 2, :, :] - outputs[vol_shape[0] // 2, :, :]),
+                outputs[:, vol_shape[1] // 2, :],
+                vol[:, vol_shape[1] // 2, :],
+                (vol[:, vol_shape[1] // 2, :] - outputs[:, vol_shape[1] // 2, :]),
                 outputs[:, :, vol_shape[2] // 2],
                 vol[:, :, vol_shape[2] // 2],
                 (vol[:, :, vol_shape[2] // 2] - outputs[:, :, vol_shape[2] // 2]),
