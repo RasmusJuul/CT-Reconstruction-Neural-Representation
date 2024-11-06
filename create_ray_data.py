@@ -5,6 +5,8 @@ import h5py
 import scipy
 import numpy as np
 import pandas as pd
+from glob import glob
+import qim3d
 
 from tqdm import tqdm
 from joblib import Parallel, delayed
@@ -138,83 +140,92 @@ def define_geometry(src_vu_pix: NDArray, vol_z0_pix: float, vol_shape_yxz: Seque
     
 if __name__=="__main__":
     # sourec points in multiple of pixel unit:
-    sources_v = np.linspace(-5, 5, 4) * 2e1
-    sources_u = np.linspace(-5, 5, 4) * 2e1
+    sources_v = np.linspace(-5, 5, 3) * 2e1
+    sources_u = np.linspace(-5, 5, 3) * 2e1
     src_vu_pix = np.meshgrid(sources_v, sources_u, indexing="ij")
     src_vu_pix = np.stack([c.flatten() for c in src_vu_pix], axis=0)
     
-    angles = np.linspace(0,np.pi,16)
+    angles = np.linspace(0,np.pi,9)
     
     #here we are assuming the phantom volume is 1 um voxel size.
-    detector_distance = 100e4 #deafult 1, if voxel size = 1um, then 1m = 1e6.
+    # detector_distance = 100e4 #deafult 1, if voxel size = 1um, then 1m = 1e6. synthetic fibers
+    detector_distance = 125e4 #soldier larva
     sample_source_distance = 3e4 #default 1500, if voxel size = 1um, 3cm = 3e4
     pixel_size_x = 55.0 #default 1, 55um pixel size
     pixel_size_y = 55.0 #default 1, 55um pixel size
+
+    files = glob(f"{_PATH_DATA}/bugnist_256/SL/*.tif")
     
-    vol_shape_yxz = np.array([256,256,256])
+    # vol_shape_yxz = np.array([256,256,256]) #Synthetic fibers
+    vol_shape_yxz = np.array([128,128,256]) #Soldier larva
+    
     df_list = []
-    for k in tqdm(range(20,40),unit="volume", desc="interpolating points"):
-        with h5py.File(f"{_PATH_DATA}/FiberDataset/filaments_volumes.hdf5", 'r') as f:
-            vol = f["volumes"][k,:,:,:].transpose(2,1,0)
+    for k in tqdm(range(25),unit="volume", desc="interpolating points"):
+        vol = qim3d.io.load(files[k],progress_bar=False)
+        vol -= vol.min()
+        vol = vol/vol.max()
+        # # Synthetic fibers
+        # with h5py.File(f"{_PATH_DATA}/FiberDataset/filaments_volumes.hdf5", 'r') as f:
+        #     vol = f["volumes"][k,:,:,:].transpose(2,1,0)
             
-        for option in [True,False]:
-            projector_data = dict(src_vu_pix=np.array(src_vu_pix),
-                                  vol_z0_pix=sample_source_distance,
-                                  vol_shape_yxz=vol_shape_yxz,
-                                  angles=angles,
-                                  super_sampling=1,
-                                  detector_z=detector_distance,
-                                  pixel_size_x=pixel_size_x,
-                                  pixel_size_y=pixel_size_y,
-                                  angle=option,
-                                  direction=1)
-            
-            positions = define_geometry(**projector_data)
         
-            detector_size = vol_shape_yxz[:2]
-            detector_pos = torch.tensor(positions[:, 3:6])
-            detector_pixel_size = torch.tensor(positions[:, 6:])
-            
-            source_pos = torch.tensor(positions[:, :3])
-            object_shape = vol_shape_yxz
-            
-            end_points = [None] * positions.shape[0]
-            start_points = [None] * positions.shape[0]
-            valid_rays = [None] * positions.shape[0]
-            
-            for i in tqdm(range(positions.shape[0]), desc="Generating points from rays"):
-                geometry = Geometry(
-                    source_pos[i],
-                    detector_pos[i],
-                    detector_size,
-                    detector_pixel_size[i],
-                    object_shape,
+        projector_data = dict(src_vu_pix=np.array(src_vu_pix),
+                              vol_z0_pix=sample_source_distance,
+                              vol_shape_yxz=vol_shape_yxz,
+                              angles=angles,
+                              super_sampling=1,
+                              detector_z=detector_distance,
+                              pixel_size_x=pixel_size_x,
+                              pixel_size_y=pixel_size_y,
+                              angle=True,
+                              direction=1)
+        
+        positions = define_geometry(**projector_data)
+    
+        detector_size = vol_shape_yxz[:2]
+        detector_pos = torch.tensor(positions[:, 3:6])
+        detector_pixel_size = torch.tensor(positions[:, 6:])
+        
+        source_pos = torch.tensor(positions[:, :3])
+        object_shape = vol_shape_yxz
+        
+        end_points = [None] * positions.shape[0]
+        start_points = [None] * positions.shape[0]
+        valid_rays = [None] * positions.shape[0]
+        
+        for i in tqdm(range(positions.shape[0]), desc="Generating points from rays"):
+            geometry = Geometry(
+                source_pos[i],
+                detector_pos[i],
+                detector_size,
+                detector_pixel_size[i],
+                object_shape,
+            )
+            end_points[i] = geometry.end_points
+            start_points[i] = geometry.start_points
+            valid_rays[i] = geometry.valid_rays
+        
+        end_points = torch.cat(end_points).view(-1, 3)
+        start_points = torch.cat(start_points).view(-1, 3)
+        valid_rays = torch.cat(valid_rays)
+    
+        projection_shape = (len(angles),*vol_shape_yxz[:2])
+        valid_indices = valid_rays.view(projection_shape)
+        idxs = [0]
+        for i in range(len(angles)):
+            if i == len(angles)-1:
+                idxs.append(idxs[i] + torch.sum(valid_indices[i]).item()-1)
+            else:
+                idxs.append(idxs[i] + torch.sum(valid_indices[i]).item())
+    
+        
+        
+        df_list.append(
+            Parallel(n_jobs=len(angles))(
+                delayed(interpolate_points)(i,positions[i], start_points[idxs[i]:idxs[i+1]], end_points[idxs[i]:idxs[i+1]], vol)
+                for i in range(len(angles))
                 )
-                end_points[i] = geometry.end_points
-                start_points[i] = geometry.start_points
-                valid_rays[i] = geometry.valid_rays
-            
-            end_points = torch.cat(end_points).view(-1, 3)
-            start_points = torch.cat(start_points).view(-1, 3)
-            valid_rays = torch.cat(valid_rays)
-        
-            projection_shape = (16,256,256)
-            valid_indices = valid_rays.view(projection_shape)
-            idxs = [0]
-            for i in range(16):
-                if i == 15:
-                    idxs.append(idxs[i] + torch.sum(valid_indices[i]).item()-1)
-                else:
-                    idxs.append(idxs[i] + torch.sum(valid_indices[i]).item())
-        
-            
-            
-            df_list.append(
-                Parallel(n_jobs=16)(
-                    delayed(interpolate_points)(i,positions[i], start_points[idxs[i]:idxs[i+1]], end_points[idxs[i]:idxs[i+1]], vol)
-                    for i in range(16)
-                    )
-                )
+            )
             
     # Concatenate all dataframes
     df_list = [df for list_ in df_list for df in list_]
@@ -225,7 +236,8 @@ if __name__=="__main__":
     positions = np.array(list(combined_df.position))
     rays = np.array(list(combined_df.ray))
     
-    hdf5_path = f"{_PATH_DATA}/FiberDataset/combined_interpolated_points.hdf5"
+    # hdf5_path = f"{_PATH_DATA}/FiberDataset/combined_interpolated_points.hdf5"
+    hdf5_path = f"{_PATH_DATA}/bugnist_256/SL_combined_interpolated_points.hdf5"
     # Create HDF5 file
     with h5py.File(hdf5_path, 'w') as hdf5_file:
         # Create a dataset in the file

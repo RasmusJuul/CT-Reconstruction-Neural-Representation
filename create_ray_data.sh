@@ -4,8 +4,8 @@
 #BSUB -n 16
 #BSUB -R "span[hosts=1]"
 ##BSUB -gpu "num=1:mode=exclusive_process"
-#BSUB -W 24:00
-#BSUB -R "rusage[mem=8GB]"
+#BSUB -W 06:00
+#BSUB -R "rusage[mem=15GB]"
 ##BSUB -R "select[gpu32gb]" #options gpu40gb or gpu80gb
 #BSUB -o gpu_logs/gpu_%J.out
 #BSUB -e gpu_logs/gpu_%J.err

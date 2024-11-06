@@ -22,7 +22,7 @@ source ../envs/renner/bin/activate
 # Run main.py --help to get options
 
 MYTMP=${__LSF_JOB_TMPDIR__}
-cp data/FiberDataset/combined_interpolated_points.hdf5 $MYTMP
+cp data/bugnist_256/SL_combined_interpolated_points.hdf5 $MYTMP
 
 # cp data/FiberDataset/filaments_volumes.hdf5 $MYTMP
 
@@ -36,5 +36,6 @@ cp data/FiberDataset/combined_interpolated_points.hdf5 $MYTMP
 
 # TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name CT-reconstruction --data-path FiberDataset/filaments_volumes_0 --no-latent --encoder hashgrid --activation-function relu --model-lr 1e-3 --num-epochs 100000 --batch-size 1000 --num-workers 16 --volume-sidelength 256 256 256  --noisy-points --regularization-weight 1e-3 --noise-level 5e-2
 
-TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_raygan.py --experiment-name raygan --data-path FiberDataset/filaments_volumes_100 --encoder frequency --activation-function sine --model-lr 1e-4 --d-lr 1e-3 --num-epochs 100000 --batch-size 7500 --num-workers 16 --regularization-weight 1e-2 --ray-data-path $MYTMP/combined_interpolated_points.hdf5
+# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_raygan.py --experiment-name raygan --data-path FiberDataset/filaments_volumes_100 --encoder hashgrid --activation-function relu --model-lr 1e-4 --d-lr 1e-3 --num-epochs 100000 --batch-size 7500 --num-workers 16 --regularization-weight 1e-2 --ray-data-path $MYTMP/combined_interpolated_points.hdf5
 
+TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_raygan.py --experiment-name raygan_SL --data-path bugnist_256/SL/soldat_12_035 --encoder hashgrid --activation-function relu --model-lr 1e-4 --d-lr 1e-3 --num-epochs 100000 --batch-size 7500 --num-workers 16 --regularization-weight 1e-2 --ray-data-path $MYTMP/SL_combined_interpolated_points.hdf5
