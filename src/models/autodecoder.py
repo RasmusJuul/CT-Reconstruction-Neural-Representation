@@ -1161,8 +1161,6 @@ class Discriminator(torch.nn.Module):
 
     def forward(self, img):
         validity = self.model(img).squeeze().unsqueeze(dim=1)
-        
-
         return validity
 
 # 100x100
@@ -1185,6 +1183,4 @@ class Discriminator(torch.nn.Module):
 
 #     def forward(self, img):
 #         validity = self.model(img).squeeze().unsqueeze(dim=1)
-        
-
 #         return validity

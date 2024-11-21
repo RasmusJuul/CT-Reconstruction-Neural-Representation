@@ -21,14 +21,14 @@ import wandb
 
 from src import _PATH_DATA, _PATH_MODELS, _PROJECT_ROOT
 from src.dataloaders import CTRayDataModule
-from src.models.nfraygan import RayGAN
+from src.models.nfraygan import RayGAN, NeuralGAN
 from src import get_device
 
 torch._dynamo.config.suppress_errors = True
 
 
 def main(args_dict):
-    if torch.cuda.get_device_properties(0).total_memory / 2**30 > 42:
+    if torch.cuda.get_device_properties(0).total_memory / 2**30 > 60:
         args_dict["training"]["batch_size"] *= 2
         
     seed_everything(args_dict["general"]["seed"], workers=True)
@@ -40,11 +40,10 @@ def main(args_dict):
     projection_shape = np.load(
                 f"{_PATH_DATA}/{args_dict['general']['data_path']}_projections.npy"
             ).shape
-    model = RayGAN(
+    model = NeuralGAN(
         args_dict,
         projection_shape=projection_shape,
     )
-    # model = torch.compile(model)
 
     if (
         args_dict["general"]["weights_only"]
@@ -90,7 +89,6 @@ def main(args_dict):
         #strategy="ddp_find_unused_parameters_true",
         num_sanity_val_steps=0,
         check_val_every_n_epoch=1,
-        # profiler=profiler,
     )
 
     if (

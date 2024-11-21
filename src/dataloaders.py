@@ -38,7 +38,9 @@ def collate_fn_raygan(batch):
     real_position = batch[6]
     real_start_points = batch[7]
     real_end_points = batch[8]
-    return points, targets, position, start_points, end_points, real_ray, real_position, real_start_points, real_end_points
+    real_slices = batch[9]
+    embedding = batch[10]
+    return points, targets, position, start_points, end_points, real_ray, real_position, real_start_points, real_end_points, real_slices, embedding
 
 class Geometry(torch.nn.Module):
     def __init__(
@@ -380,6 +382,7 @@ class CTpointsWithRays(torch.utils.data.Dataset):
 
         self.args = args_dict
         data_path = f"{_PATH_DATA}/{self.args['general']['data_path']}"
+        self.file_path = data_path
 
         positions = np.load(f"{data_path}_positions.npy")
         self.projections = np.load(f"{data_path}_projections.npy")
@@ -440,7 +443,10 @@ class CTpointsWithRays(torch.utils.data.Dataset):
         self.real_start_points = None
         self.real_end_points = None
         self.real_rays = None
+
+        self.dataset = None
         
+        self.counter_for_slices = 0
 
         self.noisy = noisy_points
 
@@ -499,8 +505,26 @@ class CTpointsWithRays(torch.utils.data.Dataset):
         real_position = torch.from_numpy(self.real_positions[sample_idx]).contiguous().to(dtype=torch.float)
         real_start_points = torch.from_numpy(self.real_start_points[sample_idx]).contiguous().to(dtype=torch.float)
         real_end_points = torch.from_numpy(self.real_end_points[sample_idx]).contiguous().to(dtype=torch.float)
+
+        if self.dataset is None:
+            if "bugnist_256" in self.file_path:
+                self.dataset = h5py.File(f"{'/'.join(self.real_ray_path.split('/')[:-1])}/SL_cubed_clean.hdf5", "r")["volumes"]
+                # don't sample the training volume so avoid soldat_16_000 (idx 198), manual for now
+                self.volume_idxs = np.append(np.arange(198),np.arange(self.dataset.shape[0])[199:])
+
+        # take the middel slice in each direction from a volume
+        real_slices = torch.stack((torch.from_numpy(self.dataset[self.volume_idxs[self.counter_for_slices],:,:,128]),
+                                   torch.from_numpy(self.dataset[self.volume_idxs[self.counter_for_slices],:,128,:]),
+                                   torch.from_numpy(self.dataset[self.volume_idxs[self.counter_for_slices],128,:,:]))
+                                 ).unsqueeze(dim=1).contiguous().to(dtype=torch.float)
+        embedding = torch.tensor([[0,0,1],[0,1,0],[1,0,0]])
         
-        return points, targets, position, start_points, end_points, real_ray, real_position, real_start_points, real_end_points
+        # Increase counter, and reset when counter reaches the number of volumes available
+        self.counter_for_slices += 1
+        if self.counter_for_slices == self.volume_idxs.shape[0]:
+            self.counter_for_slices = 0
+        
+        return points, targets, position, start_points, end_points, real_ray, real_position, real_start_points, real_end_points, real_slices, embedding
 
 class CTRayDataModule(pl.LightningDataModule):
     def __init__(

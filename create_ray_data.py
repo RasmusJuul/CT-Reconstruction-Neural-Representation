@@ -140,28 +140,28 @@ def define_geometry(src_vu_pix: NDArray, vol_z0_pix: float, vol_shape_yxz: Seque
     
 if __name__=="__main__":
     # sourec points in multiple of pixel unit:
-    sources_v = np.linspace(-5, 5, 3) * 2e1
-    sources_u = np.linspace(-5, 5, 3) * 2e1
+    sources_v = np.linspace(-5, 5, 1) * 2e1
+    sources_u = np.linspace(-5, 5, 2) * 2e1
     src_vu_pix = np.meshgrid(sources_v, sources_u, indexing="ij")
     src_vu_pix = np.stack([c.flatten() for c in src_vu_pix], axis=0)
     
-    angles = np.linspace(0,np.pi,9)
+    angles = np.linspace(0,np.pi/2,2)
     
     #here we are assuming the phantom volume is 1 um voxel size.
     # detector_distance = 100e4 #deafult 1, if voxel size = 1um, then 1m = 1e6. synthetic fibers
-    detector_distance = 125e4 #soldier larva
+    detector_distance = 150e4 #soldier larva
     sample_source_distance = 3e4 #default 1500, if voxel size = 1um, 3cm = 3e4
     pixel_size_x = 55.0 #default 1, 55um pixel size
     pixel_size_y = 55.0 #default 1, 55um pixel size
 
-    files = glob(f"{_PATH_DATA}/bugnist_256/SL/*.tif")
+    files = pd.read_csv(f"{_PATH_DATA}/bugnist_256/SL_ray_files.csv").file_name.to_list()
     
-    # vol_shape_yxz = np.array([256,256,256]) #Synthetic fibers
-    vol_shape_yxz = np.array([128,128,256]) #Soldier larva
+    vol_shape_yxz = np.array([256,256,256]) #Synthetic fibers
     
     df_list = []
-    for k in tqdm(range(25),unit="volume", desc="interpolating points"):
-        vol = qim3d.io.load(files[k],progress_bar=False)
+    for file in tqdm(files,unit="volume", desc="interpolating points"):
+        f"{_PATH_DATA}/bugnist_256/SL_cubed_clean/{file.split('/')[-1]}"
+        vol = qim3d.io.load(file,progress_bar=False)
         vol -= vol.min()
         vol = vol/vol.max()
         # # Synthetic fibers
@@ -237,7 +237,7 @@ if __name__=="__main__":
     rays = np.array(list(combined_df.ray))
     
     # hdf5_path = f"{_PATH_DATA}/FiberDataset/combined_interpolated_points.hdf5"
-    hdf5_path = f"{_PATH_DATA}/bugnist_256/SL_combined_interpolated_points.hdf5"
+    hdf5_path = f"{_PATH_DATA}/bugnist_256/SL_clean_combined_interpolated_points_2_angles.hdf5"
     # Create HDF5 file
     with h5py.File(hdf5_path, 'w') as hdf5_file:
         # Create a dataset in the file
