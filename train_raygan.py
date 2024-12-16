@@ -28,8 +28,8 @@ torch._dynamo.config.suppress_errors = True
 
 
 def main(args_dict):
-    if torch.cuda.get_device_properties(0).total_memory / 2**30 > 60:
-        args_dict["training"]["batch_size"] *= 2
+    # if torch.cuda.get_device_properties(0).total_memory / 2**30 > 60:
+    #     args_dict["training"]["batch_size"] *= 2
         
     seed_everything(args_dict["general"]["seed"], workers=True)
     torch.set_float32_matmul_precision("medium")
@@ -40,10 +40,17 @@ def main(args_dict):
     projection_shape = np.load(
                 f"{_PATH_DATA}/{args_dict['general']['data_path']}_projections.npy"
             ).shape
-    model = NeuralGAN(
-        args_dict,
-        projection_shape=projection_shape,
-    )
+
+    if args_dict["training"]["slices"]:
+        model = NeuralGAN(
+            args_dict,
+            projection_shape=projection_shape,
+        )
+    else:
+        model = RayGAN(
+            args_dict,
+            projection_shape=projection_shape,
+        )
 
     if (
         args_dict["general"]["weights_only"]
@@ -54,7 +61,7 @@ def main(args_dict):
                 f"{_PATH_MODELS}/{args_dict['general']['checkpoint_path']}",
                 map_location=None,
             )["state_dict"],
-            strict=True,
+            strict=False,
         )
 
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
@@ -136,6 +143,13 @@ if __name__ == "__main__":
     parser_general.add_argument(
         "--weights-only", action="store_true", help="only loads weights from checkpoint"
     )
+    parser_general.add_argument(
+        "--beam-type",
+        type=str,
+        default="cone",
+        choices=["cone","parallel"],
+        help="Path to ray data",
+    )
 
     parser_training = parser.add_argument_group("Training")
     parser_training.add_argument(
@@ -182,6 +196,11 @@ if __name__ == "__main__":
         default=None,
         help="constant which will be multiplied by gaussian noise with 0 mean and std of the mean value of the projections",
     )
+    parser_training.add_argument(
+        "--slices",
+        action="store_true",
+        help="Whether or not use adversarial loss on slices",
+    )
     
 
     parser_model = parser.add_argument_group("Model")
@@ -227,6 +246,7 @@ if __name__ == "__main__":
             "seed": args.seed,
             "checkpoint_path": args.checkpoint_path,
             "weights_only": args.weights_only,
+            "beam_type": args.beam_type,
         },
         "training": {
             "num_epochs": args.num_epochs,
@@ -239,6 +259,7 @@ if __name__ == "__main__":
             "noisy_points": args.noisy_points,
             "regularization_weight": args.regularization_weight,
             "noise_level": args.noise_level,
+            "slices": args.slices,
         },
         "model": {
             "num_hidden_layers": args.num_hidden_layers,

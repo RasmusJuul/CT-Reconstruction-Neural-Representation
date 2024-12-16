@@ -279,6 +279,13 @@ if __name__ == "__main__":
     parser_general.add_argument(
         "--weights-only", action="store_true", help="only loads weights from checkpoint"
     )
+    parser_general.add_argument(
+        "--beam-type",
+        type=str,
+        default="cone",
+        choices=["cone","parallel"],
+        help="Path to ray data",
+    )
 
     parser_training = parser.add_argument_group("Training")
     parser_training.add_argument(
@@ -413,6 +420,7 @@ if __name__ == "__main__":
             "seed": args.seed,
             "checkpoint_path": args.checkpoint_path,
             "weights_only": args.weights_only,
+            "beam_type": args.beam_type,
         },
         "training": {
             "num_epochs": args.num_epochs,

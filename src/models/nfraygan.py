@@ -73,7 +73,11 @@ def compute_projection_values(
 
     return attenuation_sum
 
-def gaussian(x, mean, std):
+@torch.jit.script
+def gaussian(x: torch.Tensor,
+             mean: torch.Tensor,
+             std: torch.Tensor
+            ) -> torch.Tensor:
     return torch.exp(-0.5 * ((x - mean) / std) ** 2) / (std * torch.sqrt(torch.tensor(2 * torch.pi)))
 
 class GaussianLoss(nn.Module):
@@ -87,7 +91,7 @@ class GaussianLoss(nn.Module):
         loss = 0
         for mean, std, weight in zip(self.means, self.stds, self.weights):
             loss += weight * gaussian(x, mean, std)
-        return -torch.log(loss)  # Negative log-likelihood
+        return -torch.log(loss+1e-8) + 0.6904994249343872 #adding 0.69.. so the result is zero for the peaks instead of negative, depends on the weight and std of the gaussian
 
 class RayGAN(LightningModule):
 
@@ -247,65 +251,75 @@ class RayGAN(LightningModule):
         smoothness_loss = self.l1_regularization(
             attenuation_values[:, 1:], attenuation_values[:, :-1]
         )  # punish model for big changes between adjacent points (to make it smooth)
-        loss += self.l1_regularization_weight * smoothness_loss
+        total_loss = loss + self.l1_regularization_weight * smoothness_loss
         
-        if self.current_epoch > 10:
+        if self.current_epoch > 20:
             valid = torch.ones(attenuation_values.size(0), 1)
             valid = valid.type_as(attenuation_values)
-            g_loss = self.adversarial_loss(self.Discriminator(attenuation_values,position,start_points,end_points), valid)
-            total_loss = loss+(1e-3 * g_loss)
-        else:
-            total_loss = loss
+            g_loss = 1e-1 * self.adversarial_loss(self.Discriminator(attenuation_values,position,start_points,end_points), valid)
+            total_loss += g_loss
+
 
         self.manual_backward(total_loss)
         optimizer_g.step()
         optimizer_g.zero_grad()
         self.untoggle_optimizer(optimizer_g)
 
-        if self.current_epoch > 10:
-            # train discriminator
-            # Measure discriminator's ability to classify real from generated samples
-            self.toggle_optimizer(optimizer_d)
+        if self.current_epoch > 20:
+            if self.current_epoch%2 == 0:
+                # train discriminator
+                # Measure discriminator's ability to classify real from generated samples
+                self.toggle_optimizer(optimizer_d)
+        
+                # how well can it label as real?
+                valid = torch.ones(real_ray.size(0), 1)
+                valid = valid.type_as(real_ray)
+                pred_target = self.Discriminator(real_ray,real_position,real_start_points,real_end_points)
+                real_loss = self.adversarial_loss(pred_target, valid)
+                self.acc(pred_target, valid)
+        
+                # how well can it label as fake?
+                fake = torch.zeros(attenuation_values.size(0), 1)
+                fake = fake.type_as(attenuation_values)
+                pred_generated = self.Discriminator(attenuation_values.detach(),position,start_points,end_points)
+                fake_loss = self.adversarial_loss(pred_generated, fake)
+                self.acc(pred_generated,fake)
+                
+                # discriminator loss is the average of these
+                d_loss = (real_loss + fake_loss) / 2
+                if torch.any(torch.isnan(d_loss)):
+                    print("nan in d_loss")
+                    raise ValueError('Nan in output')
+                self.manual_backward(d_loss)
+                optimizer_d.step()
+                optimizer_d.zero_grad()
+                self.untoggle_optimizer(optimizer_d)
     
-            # how well can it label as real?
-            valid = torch.ones(real_ray.size(0), 1)
-            valid = valid.type_as(real_ray)
-            pred_target = self.Discriminator(real_ray,real_position,real_start_points,real_end_points)
-            real_loss = self.adversarial_loss(pred_target, valid)
-            acc_real = self.acc(pred_target, valid)
     
-            # how well can it label as fake?
-            fake = torch.zeros(attenuation_values.size(0), 1)
-            fake = fake.type_as(attenuation_values)
-            pred_generated = self.Discriminator(attenuation_values.detach(),position,start_points,end_points)
-            fake_loss = self.adversarial_loss(pred_generated, fake)
-            acc_fake =  self.acc(pred_generated,fake)
-            
-            # discriminator loss is the average of these
-            d_loss = (real_loss + fake_loss) / 2
-            if torch.any(torch.isnan(d_loss)):
-                print("nan in d_loss")
-                raise ValueError('Nan in output')
-            self.manual_backward(d_loss)
-            optimizer_d.step()
-            optimizer_d.zero_grad()
-            self.untoggle_optimizer(optimizer_d)
-
-
-            self.log_dict(
-                    {
-                        "train/loss": loss,
-                        "train/generator_loss": g_loss,
-                        "train/total_loss": total_loss,
-                        "train/discriminator_loss": d_loss,
-                        "train/acc_fake":acc_fake,
-                        "train/acc_real":acc_real,
-                    },
-                    on_step=True,
-                    on_epoch=True,
-                    sync_dist=True,
-                    batch_size=self.batch_size,
-                )
+                self.log_dict(
+                        {
+                            "train/loss": loss,
+                            "train/generator_loss": g_loss,
+                            "train/total_loss": total_loss,
+                            "train/discriminator_loss": d_loss,
+                            "train/acc":self.acc,
+                        },
+                        on_step=True,
+                        on_epoch=True,
+                        sync_dist=True,
+                        batch_size=self.batch_size,
+                    )
+            else:
+                self.log_dict(
+                        {
+                            "train/loss": loss,
+                            "train/total_loss": total_loss,
+                        },
+                        on_step=True,
+                        on_epoch=True,
+                        sync_dist=True,
+                        batch_size=self.batch_size,
+                    )
 
         else:
             self.log_dict(
@@ -318,6 +332,10 @@ class RayGAN(LightningModule):
                     sync_dist=True,
                     batch_size=self.batch_size,
                 )
+        if self.trainer.is_last_batch:
+            sch1, sch2 = self.lr_schedulers()
+            sch1.step()
+            sch2.step()
         
         return loss
 
@@ -445,9 +463,22 @@ class RayGAN(LightningModule):
             
             
         optimizer_d = torch.optim.AdamW(self.Discriminator.parameters(),lr=self.d_lr,amsgrad=True)
-
         
-        return [optimizer_g,optimizer_d],[]
+        lr_lambda_g = lambda epoch: 0.99 ** max(0, (epoch - 50))
+        lr_lambda_d = lambda epoch: 0.98 ** max(0, (epoch - 25))
+        scheduler_g = {
+            'scheduler': torch.optim.lr_scheduler.LambdaLR(optimizer_g, lr_lambda=lr_lambda_g),
+            'interval': 'epoch',
+            'frequency': 1
+        }
+    
+        scheduler_d = {
+            'scheduler': torch.optim.lr_scheduler.LambdaLR(optimizer_d, lr_lambda=lr_lambda_d),
+            'interval': 'epoch',
+            'frequency': 1
+        }
+        
+        return [optimizer_g,optimizer_d],[scheduler_g,scheduler_d]
 
 
 # ray discriminator (used for fibers)
@@ -467,44 +498,6 @@ class Discriminator(torch.nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
             nn.MaxPool1d(2,2),
             nn.Conv1d(in_channels=16, out_channels=8, kernel_size=7, padding=3),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv1d(in_channels=8, out_channels=1, kernel_size=3, padding=1),
-        )
-        self.mlp = nn.Sequential(
-            nn.Linear((num_points//4)+3+3+12, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 1),
-        )
-
-    def forward(self, ray, position, start_point,end_point):
-        conv_out = self.conv_ray(ray.unsqueeze(dim=1))
-        mlp_input = torch.cat([conv_out.squeeze(),position,start_point,end_point],dim=1)
-        validity = self.mlp(mlp_input)
-
-        return validity
-
-
-# ray discriminator
-class RayDiscriminator(torch.nn.Module):
-    def __init__(self, num_points):
-        super().__init__()
-        
-        self.conv_ray = nn.Sequential(
-            nn.Conv1d(in_channels=1, out_channels=8, kernel_size=11, padding=5),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv1d(in_channels=8, out_channels=8, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.MaxPool1d(2,2),
-            nn.Conv1d(in_channels=8, out_channels=16, kernel_size=11, padding=5),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv1d(in_channels=16, out_channels=16, kernel_size=3, padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.MaxPool1d(2,2),
-            nn.Conv1d(in_channels=16, out_channels=8, kernel_size=11, padding=5),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv1d(in_channels=8, out_channels=1, kernel_size=3, padding=1),
         )
@@ -617,9 +610,9 @@ class NeuralGAN(LightningModule):
             self.mlp_second_half.apply(sine_init)
             self.mlp_first_half[0].apply(first_layer_sine_init)
 
-        self.RayDiscriminator = RayDiscriminator(args_dict["training"]["num_points"])
+        self.Discriminator = Discriminator(args_dict["training"]["num_points"]).cuda()
         
-        self.SliceDiscriminator = SliceDiscriminator()
+        self.SliceDiscriminator = SliceDiscriminator().cuda()
         
         self.params = torch.nn.ModuleDict(
             {
@@ -627,7 +620,7 @@ class NeuralGAN(LightningModule):
                 "model": torch.nn.ModuleList(
                     [self.mlp_first_half, self.mlp_second_half]
                 ),
-                "discriminator": torch.nn.ModuleList([self.RayDiscriminator]), 
+                "discriminator": torch.nn.ModuleList([self.Discriminator]), 
             }
         )
 
@@ -635,6 +628,11 @@ class NeuralGAN(LightningModule):
         
         self.loss_fn = torch.nn.MSELoss()
         self.l1_regularization = torch.nn.L1Loss()
+
+        means = torch.tensor([0.,0.1, 1.0],device="cuda")
+        stds = torch.tensor([0.02, 0.02, 0.02],device="cuda")
+        weights = torch.tensor([0.08, 0.099999, 0.1],device="cuda")
+        self.gaussian_loss = GaussianLoss(means, stds, weights)
 
         self.acc_ray = tm.classification.BinaryAccuracy()
         self.acc_slice = tm.classification.BinaryAccuracy()
@@ -651,7 +649,7 @@ class NeuralGAN(LightningModule):
                 indexing="ij",
             ),
             dim=-1,
-        )
+        ).to(dtype=torch.float, device=self.device)
 
     def adversarial_loss(self, y_hat, y):
         return F.binary_cross_entropy_with_logits(y_hat, y)
@@ -699,44 +697,42 @@ class NeuralGAN(LightningModule):
             attenuation_values[:, 1:], attenuation_values[:, :-1]
         )  # punish model for big changes between adjacent points (to make it smooth)
         loss += self.l1_regularization_weight * smoothness_loss
+
+        # loss += 1e-2 * self.gaussian_loss(attenuation_values).mean()
         
-        if self.current_epoch > 50:
-            valid = torch.ones(attenuation_values.size(0), 1)
-            valid = valid.type_as(attenuation_values)
-            ray_loss = self.adversarial_loss(self.RayDiscriminator(attenuation_values,position,start_points,end_points), valid)
+        valid = torch.ones(attenuation_values.size(0), 1, device=self.device)
+        valid = valid.type_as(attenuation_values)
+        ray_loss = 1e-2 * self.adversarial_loss(self.Discriminator(attenuation_values,position,start_points,end_points), valid)
+        
+        slice_xy = self.forward(self.mgrid[int(256*embedding[0,0]),:,:].reshape(-1, 3).to(device=self.device)).view(256,256)
+        slice_xz = self.forward(self.mgrid[:,int(256*embedding[1,1]),:].reshape(-1, 3).to(device=self.device)).view(256,256)
+        slice_yz = self.forward(self.mgrid[:,:,int(256*embedding[2,2])].reshape(-1, 3).to(device=self.device)).view(256,256)
+        slices = torch.stack((slice_xy,slice_xz,slice_yz)).unsqueeze(dim=1).to(device=self.device)
+
+        slice_loss = 1e-1 * self.adversarial_loss(self.SliceDiscriminator(slices,embedding), torch.ones(3,1, device=self.device).type_as(slices))
+
+        total_loss = loss + ray_loss + slice_loss
             
-            slice_xy = self.forward(self.mgrid[:,:,128].reshape(-1, 3).to(device=self.device)).view(256,256)
-            slice_xz = self.forward(self.mgrid[:,128,:].reshape(-1, 3).to(device=self.device)).view(256,256)
-            slice_yz = self.forward(self.mgrid[128,:,:].reshape(-1, 3).to(device=self.device)).view(256,256)
-            slices = torch.stack((slice_xy,slice_xz,slice_yz)).unsqueeze(dim=1)
-    
-            slice_loss = self.adversarial_loss(self.SliceDiscriminator(slices,embedding), torch.ones(3,1).type_as(slices))
-    
-            total_loss = loss + (1e-4 * ray_loss) + (1e-2 * slice_loss)
-        else:
-            total_loss = loss
         
         self.manual_backward(total_loss)
         optimizer_g.step()
         optimizer_g.zero_grad()
         self.untoggle_optimizer(optimizer_g)
-        
-        if self.current_epoch > 50:
+
+        if self.current_epoch%2 == 0:
             # train ray discriminator
             # Measure discriminator's ability to classify real from generated samples
             self.toggle_optimizer(optimizer_d_ray)
     
             # how well can it label as real?
-            valid = torch.ones(real_ray.size(0), 1)
-            valid = valid.type_as(real_ray)
-            pred_target = self.RayDiscriminator(real_ray,real_position,real_start_points,real_end_points)
+            valid = torch.ones(real_ray.size(0), 1, device=self.device).type_as(real_ray)
+            pred_target = self.Discriminator(real_ray,real_position,real_start_points,real_end_points)
             real_loss = self.adversarial_loss(pred_target, valid)
             self.acc_ray(pred_target, valid)
     
             # how well can it label as fake?
-            fake = torch.zeros(attenuation_values.size(0), 1)
-            fake = fake.type_as(attenuation_values)
-            pred_generated = self.RayDiscriminator(attenuation_values.detach(),position,start_points,end_points)
+            fake = torch.zeros(attenuation_values.size(0), 1, device=self.device).type_as(attenuation_values)
+            pred_generated = self.Discriminator(attenuation_values.detach(),position,start_points,end_points)
             fake_loss = self.adversarial_loss(pred_generated, fake)
             self.acc_ray(pred_generated,fake)
             
@@ -755,14 +751,13 @@ class NeuralGAN(LightningModule):
             self.toggle_optimizer(optimizer_d_slice)
     
             # how well can it label as real?
-            valid = torch.ones(3, 1)
-            valid = valid.type_as(real_ray)
+            valid = torch.ones(3, 1, device=self.device).type_as(real_ray)
             pred_target = self.SliceDiscriminator(real_slices,embedding)
             real_loss = self.adversarial_loss(pred_target, valid)
             self.acc_slice(pred_target, valid)
     
             # how well can it label as fake?
-            fake = torch.zeros(3, 1).type_as(slices)
+            fake = torch.zeros(3, 1, device=self.device).type_as(slices)
             pred_generated = self.SliceDiscriminator(slices.detach(), embedding)
             fake_loss = self.adversarial_loss(pred_generated, fake)
             self.acc_slice(pred_generated,fake)
@@ -776,8 +771,8 @@ class NeuralGAN(LightningModule):
             optimizer_d_slice.step()
             optimizer_d_slice.zero_grad()
             self.untoggle_optimizer(optimizer_d_slice)
-
-
+    
+    
             self.log_dict(
                     {
                         "train/loss": loss,
@@ -798,6 +793,8 @@ class NeuralGAN(LightningModule):
             self.log_dict(
                     {
                         "train/loss": loss,
+                        "train/ray_loss": ray_loss,
+                        "train/slice_loss": slice_loss,
                         "train/total_loss": total_loss,
                     },
                     on_step=True,
@@ -923,8 +920,8 @@ class NeuralGAN(LightningModule):
             )
             
             
-        optimizer_d_ray = torch.optim.AdamW(self.RayDiscriminator.parameters(),lr=self.d_lr,amsgrad=True)
-        optimizer_d_slice = torch.optim.AdamW(self.SliceDiscriminator.parameters(),lr=1e-3,amsgrad=True)
+        optimizer_d_ray = torch.optim.AdamW(self.Discriminator.parameters(),lr=self.d_lr,amsgrad=True)
+        optimizer_d_slice = torch.optim.AdamW(self.SliceDiscriminator.parameters(),lr=self.d_lr,amsgrad=True)
 
         
         return [optimizer_g,optimizer_d_ray,optimizer_d_slice],[]
@@ -936,19 +933,19 @@ class SliceDiscriminator(torch.nn.Module):
         super().__init__()
         
         self.model = nn.Sequential(
-            nn.Conv2d(in_channels=1, out_channels=16, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels=1, out_channels=8, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
             nn.MaxPool2d(4,4),
-            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels=8, out_channels=16, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
             nn.MaxPool2d(4,4),
-            nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels=16, out_channels=16, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
             nn.MaxPool2d(4,4),
-            nn.Conv2d(in_channels=32, out_channels=16, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels=16, out_channels=8, kernel_size=3, padding=1),
             nn.LeakyReLU(0.2, inplace=True),
             nn.MaxPool2d(4,4),
-            nn.Conv2d(in_channels=16, out_channels=1, kernel_size=1),
+            nn.Conv2d(in_channels=8, out_channels=1, kernel_size=1),
         )
         self.classifier = nn.Sequential(
             nn.Linear(4,32),
@@ -956,8 +953,8 @@ class SliceDiscriminator(torch.nn.Module):
             nn.Linear(32,1)
         )
     def forward(self, img, embedding):
-        conv_out = self.model(img).squeeze().unsqueeze(dim=1)
-        x = torch.cat((conv_out.T,embedding)).T
+        conv_out = self.model(img).squeeze().unsqueeze(dim=0)
+        x = torch.cat((conv_out,embedding)).T
         validity = self.classifier(x)
         
         return validity

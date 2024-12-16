@@ -4,9 +4,11 @@ from joblib import Parallel, delayed
 from tqdm import tqdm
 import tifffile
 import os
+from glob import glob
+import pandas as pd
+import h5py
 
 from src import _PATH_DATA
-
 
 def generate_points(num_points, x_range, y_range, min_dist, rng):
     # generate vector points for the starting positions of every fibre.
@@ -19,8 +21,8 @@ def generate_points(num_points, x_range, y_range, min_dist, rng):
         if all(np.linalg.norm(new_point - point) >= min_dist for point in points):
             points.append(new_point)
         num_tries += 1
-        if num_tries > 5000:
-            print("failed after 5000 tries")
+        if num_tries > 10000:
+            print("failed after 10000 tries")
             break
 
     return np.array(points)
@@ -68,12 +70,12 @@ def create_cylinder(volume_size, radius, length, orientation, start_point):
 def create_fibre_bundle(volume_size, radius, length, n_fibres, misalignment, rng):
 
     nvs = (volume_size[0], volume_size[1], 30)
-    volume_out = np.zeros(nvs, dtype=np.float32)
+    volume_out = np.ones(nvs, dtype=np.float32)*0.1
     points_out = generate_points(
         n_fibres,
-        (30, volume_size[0] * 0.9),
-        (30, volume_size[0] * 0.9),
-        radius * 3,
+        (1, volume_size[0]-1),
+        (1, volume_size[0]-1),
+        radius * 2,
         rng,
     )
     sp1 = points_out[:, 0].reshape(-1, 1)
@@ -93,7 +95,27 @@ def create_fibre_bundle(volume_size, radius, length, n_fibres, misalignment, rng
         )
         volume_out += this_cylinder_volume
     volume_out = np.clip(volume_out, 0, 1)
+    mask = create_circular_mask(volume_out.shape[:2])
+    volume_out = apply_mask(volume_out,mask)
     return volume_out
+
+def create_circular_mask(image_shape, center=None, radius=None):
+    h, w = image_shape[:2]
+    if center is None:  # use the middle of the image
+        center = (int(w/2), int(h/2))
+    if radius is None:  # use the smallest distance between the center and image walls
+        radius = min(center[0], center[1], w-center[0], h-center[1])
+
+    Y, X = np.ogrid[:h, :w]
+    dist_from_center = np.sqrt((X - center[0])**2 + (Y - center[1])**2)
+
+    mask = dist_from_center <= radius
+    return mask
+
+def apply_mask(image, mask):
+    masked_image = image.copy()
+    masked_image[~mask] = 0
+    return masked_image
 
 
 def save_file(mode, folder_name, count, i, vol):
@@ -102,21 +124,21 @@ def save_file(mode, folder_name, count, i, vol):
 
     tifffile.imwrite(
         f"data/{folder_name}/{mode}/{subfolder}/fiber_{str(i).zfill(5)}.tif",
-        (vol * 255).astype("uint8"),
+        vol,
     )
 
 
 def main(mode, folder_name, count, i, seed):
     rng = np.random.RandomState(seed=seed)
-    vol_shape_zxy = np.array([300, 300, 300])
-    vol_shape_yxz = np.flip(vol_shape_zxy)
+    vol_shape_zxy = np.array([256, 256, 256])
+    # vol_shape_yxz = np.flip(vol_shape_zxy)
     # Example usage:
-    radius = 6  # in um
+    radius = 4  # in um
     length = 400
     orientation = (0, 0, 1)  # (x,y,z)
     start_point = (0, 0, 0)
-    misalignment = rng.rand(1)[0]  # 0-1
-    n_fibres = rng.randint(75, 125)
+    misalignment = 0.01 #rng.rand(1)[0]  # 0-1
+    n_fibres = 1000 #rng.randint(75, 125)
     # create
     # if making training data in a loop, start here (remove random seed for different volumes)
     cylinder_volume = create_fibre_bundle(
@@ -124,7 +146,7 @@ def main(mode, folder_name, count, i, seed):
     )
     cylinder_volume = sp.ndimage.zoom(cylinder_volume, (1, 1, 10), order=1)
     vol = np.ascontiguousarray(np.transpose(cylinder_volume, (2, 1, 0)))
-
+    vol = vol[22:278,:,:]
     save_file(mode, folder_name, count, i, vol)
 
 
@@ -152,7 +174,7 @@ def create_hdf5_dataset(files, hdf5_path):
     with h5py.File(hdf5_path, "w") as hdf5_file:
         # Create a dataset in the file
         dataset = hdf5_file.create_dataset(
-            "volumes", (len(files), *vol_shape), dtype="uint8"
+            "volumes", (len(files), *vol_shape), dtype="float"
         )
 
         # Loop through all images and save them to the dataset
@@ -160,8 +182,8 @@ def create_hdf5_dataset(files, hdf5_path):
             enumerate(files), unit="vol", desc="Saving volumes to hdf5 file"
         ):
             vol = tifffile.imread(f"{_PATH_DATA}/{file}")
-            vol -= vol.min()
-            vol = vol / vol.max()
+            # vol -= vol.min()
+            # vol = vol / vol.max()
             vol = vol.transpose(2, 1, 0)
             dataset[i] = vol
 
@@ -173,8 +195,8 @@ if __name__ == "__main__":
     os.makedirs(f"{_PATH_DATA}/{folder_name}/test", exist_ok=True)
     # os.makedirs(f"{_PATH_DATA}/{folder_name}/validation", exist_ok=True)
 
-    count_train = 1000
-    count_test = 100
+    count_train = 100
+    count_test = 10
     # count_validation = 2
 
     for i in range(max(1, int(count_train / 100))):
