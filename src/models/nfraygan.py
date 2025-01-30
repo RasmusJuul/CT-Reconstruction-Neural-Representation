@@ -9,8 +9,9 @@ import torchmetrics as tm
 import tifffile
 from tqdm import tqdm
 
-import tinycudann as tcnn
+# import tinycudann as tcnn
 from src import _PATH_DATA, _PATH_MODELS, _PROJECT_ROOT
+from src.encoder import get_encoder
 
 
 def get_activation_function(activation_function, args_dict, **kwargs):
@@ -73,25 +74,17 @@ def compute_projection_values(
 
     return attenuation_sum
 
-@torch.jit.script
-def gaussian(x: torch.Tensor,
-             mean: torch.Tensor,
-             std: torch.Tensor
-            ) -> torch.Tensor:
-    return torch.exp(-0.5 * ((x - mean) / std) ** 2) / (std * torch.sqrt(torch.tensor(2 * torch.pi)))
 
-class GaussianLoss(nn.Module):
-    def __init__(self, means, stds, weights):
-        super(GaussianLoss, self).__init__()
-        self.means = means
-        self.stds = stds
-        self.weights = weights
-
-    def forward(self, x):
-        loss = 0
-        for mean, std, weight in zip(self.means, self.stds, self.weights):
-            loss += weight * gaussian(x, mean, std)
-        return -torch.log(loss+1e-8) + 0.6904994249343872 #adding 0.69.. so the result is zero for the peaks instead of negative, depends on the weight and std of the gaussian
+class TruncatedLoss(nn.Module):
+    def __init__(self, k):
+        super(TruncatedLoss, self).__init__()
+        self.k = torch.tensor(k, dtype=torch.float32)
+    
+    def forward(self, a, b):
+        diff = torch.abs(a - b)
+        smooth_loss = self.k * torch.tanh((diff / self.k) ** 2)
+        loss = torch.mean(smooth_loss)
+        return loss
 
 class RayGAN(LightningModule):
 
@@ -105,7 +98,8 @@ class RayGAN(LightningModule):
         self.data_path = f"{_PATH_DATA}/{args_dict['general']['data_path']}"
         self.batch_size = args_dict["training"]["batch_size"]
 
-        self.l1_regularization_weight = args_dict["training"]["regularization_weight"]
+        self.regularization_weight = args_dict["training"]["regularization_weight"]
+        self.adversarial_weight = args_dict["training"]["adversarial_weight"]
 
         self.num_hidden_layers = args_dict["model"]["num_hidden_layers"]
         self.num_hidden_features = args_dict["model"]["num_hidden_features"]
@@ -136,8 +130,10 @@ class RayGAN(LightningModule):
         
         # Initialising encoder
         if args_dict['model']['encoder'] != None:
-            self.encoder = tcnn.Encoding(n_input_dims=3, encoding_config=config[f"encoding_{args_dict['model']['encoder']}"])
-            num_input_features = self.encoder.n_output_dims
+            self.encoder = get_encoder(args_dict['model']['encoder'])
+            num_input_features = self.encoder.output_dim
+            # self.encoder = tcnn.Encoding(n_input_dims=3, encoding_config=config[f"encoding_{args_dict['model']['encoder']}"])
+            # num_input_features = self.encoder.n_output_dims
         else:
             self.encoder = None
             num_input_features = 3  # x,y,z coordinate
@@ -199,12 +195,15 @@ class RayGAN(LightningModule):
         self.automatic_optimization = False
         
         self.loss_fn = torch.nn.MSELoss()
-        self.l1_regularization = torch.nn.L1Loss()
+        
+        self.reg_loss = torch.nn.L1Loss()
+        # self.reg_loss = TruncatedLoss(k=0.05)
 
         self.acc = tm.classification.BinaryAccuracy()
 
         self.validation_step_outputs = []
         self.validation_step_gt = []
+        self.generator_weight = 0.1
 
     def adversarial_loss(self, y_hat, y):
         return F.binary_cross_entropy_with_logits(y_hat, y)
@@ -234,7 +233,8 @@ class RayGAN(LightningModule):
 
     def training_step(self, batch, batch_idx):
         # training_step defines the train loop.
-        points, target, position, start_points, end_points, real_ray, real_position, real_start_points, real_end_points = batch
+        # points, target, position, start_points, end_points, real_ray, real_position, real_start_points, real_end_points = batch
+        points, target, start_points, end_points, real_ray, real_start_points, real_end_points = batch
         
         
         optimizer_g, optimizer_d = self.optimizers()
@@ -248,83 +248,78 @@ class RayGAN(LightningModule):
 
         loss = self.loss_fn(detector_value_hat, target)
 
-        smoothness_loss = self.l1_regularization(
+        smoothness_loss = self.regularization_weight * self.reg_loss(
             attenuation_values[:, 1:], attenuation_values[:, :-1]
         )  # punish model for big changes between adjacent points (to make it smooth)
-        total_loss = loss + self.l1_regularization_weight * smoothness_loss
-        
-        if self.current_epoch > 20:
+
+
+        if self.current_epoch%2 == 0:
             valid = torch.ones(attenuation_values.size(0), 1)
             valid = valid.type_as(attenuation_values)
-            g_loss = 1e-1 * self.adversarial_loss(self.Discriminator(attenuation_values,position,start_points,end_points), valid)
-            total_loss += g_loss
-
+            g_loss = self.adversarial_weight * self.adversarial_loss(self.Discriminator(attenuation_values,start_points,end_points), valid)
+        else:
+            g_loss = 0
+            
+        total_loss = (1-self.generator_weight)*(loss + smoothness_loss) + self.generator_weight*g_loss
 
         self.manual_backward(total_loss)
         optimizer_g.step()
         optimizer_g.zero_grad()
         self.untoggle_optimizer(optimizer_g)
 
-        if self.current_epoch > 20:
-            if self.current_epoch%2 == 0:
-                # train discriminator
-                # Measure discriminator's ability to classify real from generated samples
-                self.toggle_optimizer(optimizer_d)
         
-                # how well can it label as real?
-                valid = torch.ones(real_ray.size(0), 1)
-                valid = valid.type_as(real_ray)
-                pred_target = self.Discriminator(real_ray,real_position,real_start_points,real_end_points)
-                real_loss = self.adversarial_loss(pred_target, valid)
-                self.acc(pred_target, valid)
-        
-                # how well can it label as fake?
-                fake = torch.zeros(attenuation_values.size(0), 1)
-                fake = fake.type_as(attenuation_values)
-                pred_generated = self.Discriminator(attenuation_values.detach(),position,start_points,end_points)
-                fake_loss = self.adversarial_loss(pred_generated, fake)
-                self.acc(pred_generated,fake)
-                
-                # discriminator loss is the average of these
-                d_loss = (real_loss + fake_loss) / 2
-                if torch.any(torch.isnan(d_loss)):
-                    print("nan in d_loss")
-                    raise ValueError('Nan in output')
-                self.manual_backward(d_loss)
-                optimizer_d.step()
-                optimizer_d.zero_grad()
-                self.untoggle_optimizer(optimizer_d)
+        if self.current_epoch%3 == 0:
+            # train discriminator
+            # Measure discriminator's ability to classify real from generated samples
+            self.toggle_optimizer(optimizer_d)
     
+            # how well can it label as real?
+            valid = torch.ones(real_ray.size(0), 1)
+            valid = valid.type_as(real_ray)
+            # pred_target = self.Discriminator(real_ray,real_position,real_start_points,real_end_points)
+            pred_target = self.Discriminator(real_ray,real_start_points,real_end_points)
+            real_loss = self.adversarial_loss(pred_target, valid)
+            self.acc(pred_target, valid)
     
-                self.log_dict(
-                        {
-                            "train/loss": loss,
-                            "train/generator_loss": g_loss,
-                            "train/total_loss": total_loss,
-                            "train/discriminator_loss": d_loss,
-                            "train/acc":self.acc,
-                        },
-                        on_step=True,
-                        on_epoch=True,
-                        sync_dist=True,
-                        batch_size=self.batch_size,
-                    )
-            else:
-                self.log_dict(
-                        {
-                            "train/loss": loss,
-                            "train/total_loss": total_loss,
-                        },
-                        on_step=True,
-                        on_epoch=True,
-                        sync_dist=True,
-                        batch_size=self.batch_size,
-                    )
+            # how well can it label as fake?
+            fake = torch.zeros(attenuation_values.size(0), 1)
+            fake = fake.type_as(attenuation_values)
+            # pred_generated = self.Discriminator(attenuation_values.detach(),position,start_points,end_points)
+            pred_generated = self.Discriminator(attenuation_values.detach(),start_points,end_points)
+            fake_loss = self.adversarial_loss(pred_generated, fake)
+            self.acc(pred_generated,fake)
+            
+            # discriminator loss is the average of these
+            d_loss = (real_loss + fake_loss) / 2
+            if torch.any(torch.isnan(d_loss)):
+                print("nan in d_loss")
+                raise ValueError('Nan in output')
+            self.manual_backward(d_loss)
+            optimizer_d.step()
+            optimizer_d.zero_grad()
+            self.untoggle_optimizer(optimizer_d)
 
+
+            self.log_dict(
+                    {
+                        "train/loss": loss,
+                        "train/smoothness_loss": smoothness_loss,
+                        "train/generator_loss": g_loss,
+                        "train/total_loss": total_loss,
+                        "train/discriminator_loss": d_loss,
+                        "train/acc":self.acc,
+                    },
+                    on_step=True,
+                    on_epoch=True,
+                    sync_dist=True,
+                    batch_size=self.batch_size,
+                )
         else:
             self.log_dict(
                     {
                         "train/loss": loss,
+                        "train/smoothness_loss": smoothness_loss,
+                        "train/generator_loss": g_loss,
                         "train/total_loss": total_loss,
                     },
                     on_step=True,
@@ -340,7 +335,8 @@ class RayGAN(LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        points, target, position, start_points, end_points, real_ray, real_position, real_start_points, real_end_points = batch
+        # points, target, position, start_points, end_points, real_ray, real_position, real_start_points, real_end_points = batch
+        points, target, start_points, end_points, real_ray, real_start_points, real_end_points = batch
         
         lengths = torch.linalg.norm((points[:, -1, :] - points[:, 0, :]), dim=1)
         attenuation_values = self.forward(points).view(points.shape[0], points.shape[1])
@@ -349,11 +345,6 @@ class RayGAN(LightningModule):
         )
 
         loss = self.loss_fn(detector_value_hat, target)
-
-        smoothness_loss = self.l1_regularization(
-            attenuation_values[:, 1:], attenuation_values[:, :-1]
-        )  # punish model for big changes between adjacent points (to make it smooth)
-        loss += self.l1_regularization_weight * smoothness_loss
 
         self.validation_step_outputs.append(detector_value_hat.detach().cpu())
         self.validation_step_gt.append(target.detach().cpu())
@@ -382,60 +373,83 @@ class RayGAN(LightningModule):
         gt = torch.zeros(self.projection_shape, dtype=all_gt.dtype)
         gt[valid_rays] = all_gt
 
-        for i in np.random.randint(0, self.projection_shape[0], 2):
-            self.logger.log_image(
+        # for i in np.random.randint(0, self.projection_shape[0], 2):
+        #     self.logger.log_image(
+        #         key="val/projection",
+        #         images=[preds[i], gt[i], (gt[i] - preds[i])],
+        #         caption=[f"pred_{i}", f"gt_{i}", f"residual_{i}"],
+        #     )  # log projection images
+        
+        self.logger.log_image(
                 key="val/projection",
-                images=[preds[i], gt[i], (gt[i] - preds[i])],
-                caption=[f"pred_{i}", f"gt_{i}", f"residual_{i}"],
+                images=[preds[:,:,0], gt[:,:,0], (gt[:,:,0] - preds[:,:,0])],
+                caption=[f"pred", f"gt", f"residual"],
             )  # log projection images
 
-        mgrid = torch.stack(
-            torch.meshgrid(
-                torch.linspace(-1, 1, vol_shape[0]),
-                torch.linspace(-1, 1, vol_shape[1]),
-                torch.linspace(-1, 1, vol_shape[2]),
-                indexing="ij",
-            ),
-            dim=-1,
-        )
+        # mgrid = torch.stack(
+        #     torch.meshgrid(
+        #         torch.linspace(-1, 1, vol_shape[0]),
+        #         torch.linspace(-1, 1, vol_shape[1]),
+        #         torch.linspace(-1, 1, vol_shape[2]),
+        #         indexing="ij",
+        #     ),
+        #     dim=-1,
+        # )
+        # mgrid = torch.stack(
+        #     torch.meshgrid(
+        #         torch.linspace(-1, 1, vol_shape[0]),
+        #         torch.linspace(0.002, 0.0022, vol_shape[1]),
+        #         torch.linspace(-1, 1, vol_shape[2]),
+        #         indexing="ij",
+        #     ),
+        #     dim=-1,
+        # )
         
-        outputs = torch.zeros_like(vol)
-        for i in range(mgrid.shape[0]):
-            with torch.no_grad():
-                outputs[i] = self.forward(mgrid[i].view(-1, 3).to(device=self.device)).view(
-                    outputs[i].shape
-                )
+        # outputs = torch.zeros_like(vol)
+        # for i in range(mgrid.shape[0]):
+        #     with torch.no_grad():
+        #         outputs[i] = self.forward(mgrid[i].view(-1, 3).to(device=self.device)).view(
+        #             outputs[i].shape
+        #         )
 
-        self.log(
-            "val/loss_reconstruction",
-            self.loss_fn(outputs, vol),
-            batch_size=self.batch_size,
-        )
-        self.logger.log_image(
-            key="val/reconstruction",
-            images=[
-                outputs[vol_shape[0] // 2, :, :],
-                vol[vol_shape[0] // 2, :, :],
-                (vol[vol_shape[0] // 2, :, :] - outputs[vol_shape[0] // 2, :, :]),
-                outputs[:, vol_shape[1] // 2, :],
-                vol[:, vol_shape[1] // 2, :],
-                (vol[:, vol_shape[1] // 2, :] - outputs[:, vol_shape[1] // 2, :]),
-                outputs[:, :, vol_shape[2] // 2],
-                vol[:, :, vol_shape[2] // 2],
-                (vol[:, :, vol_shape[2] // 2] - outputs[:, :, vol_shape[2] // 2]),
-            ],
-            caption=[
-                "pred_xy",
-                "gt_xy",
-                "residual_xy",
-                "pred_yz",
-                "gt_yz",
-                "residual_yz",
-                "pred_xz",
-                "gt_xz",
-                "residual_xz",
-            ],
-        )
+        # self.log(
+        #     "val/loss_reconstruction",
+        #     self.loss_fn(outputs, vol),
+        #     batch_size=self.batch_size,
+        # )
+        # self.logger.log_image(
+        #     key="val/reconstruction",
+        #     images=[
+        #         outputs[vol_shape[0] // 2, :, :],
+        #         vol[vol_shape[0] // 2, :, :],
+        #         (vol[vol_shape[0] // 2, :, :] - outputs[vol_shape[0] // 2, :, :]),
+        #         outputs[:, vol_shape[1] // 2, :],
+        #         vol[:, vol_shape[1] // 2, :],
+        #         (vol[:, vol_shape[1] // 2, :] - outputs[:, vol_shape[1] // 2, :]),
+        #         outputs[:, :, vol_shape[2] // 2],
+        #         vol[:, :, vol_shape[2] // 2],
+        #         (vol[:, :, vol_shape[2] // 2] - outputs[:, :, vol_shape[2] // 2]),
+        #     ],
+        #     caption=[
+        #         "pred_xy",
+        #         "gt_xy",
+        #         "residual_xy",
+        #         "pred_yz",
+        #         "gt_yz",
+        #         "residual_yz",
+        #         "pred_xz",
+        #         "gt_xz",
+        #         "residual_xz",
+        #     ],
+        # )
+        # self.logger.log_image(
+        #     key="val/reconstruction",
+        #     images=[
+        #         outputs[:, 0, :],
+        #         vol[:, 0, :],
+        #         (vol[:, 0, :] - outputs[:, 0, :]),
+        #     ],
+        # )
 
         self.validation_step_outputs.clear()  # free memory
         self.validation_step_gt.clear()  # free memory
@@ -464,8 +478,8 @@ class RayGAN(LightningModule):
             
         optimizer_d = torch.optim.AdamW(self.Discriminator.parameters(),lr=self.d_lr,amsgrad=True)
         
-        lr_lambda_g = lambda epoch: 0.99 ** max(0, (epoch - 50))
-        lr_lambda_d = lambda epoch: 0.98 ** max(0, (epoch - 25))
+        lr_lambda_g = lambda epoch: 0.995 ** max(0, (epoch - 500))
+        lr_lambda_d = lambda epoch: 0.99 ** max(0, (epoch - 250))
         scheduler_g = {
             'scheduler': torch.optim.lr_scheduler.LambdaLR(optimizer_g, lr_lambda=lr_lambda_g),
             'interval': 'epoch',
@@ -502,7 +516,8 @@ class Discriminator(torch.nn.Module):
             nn.Conv1d(in_channels=8, out_channels=1, kernel_size=3, padding=1),
         )
         self.mlp = nn.Sequential(
-            nn.Linear((num_points//4)+3+3+12, 256),
+            # nn.Linear((num_points//4)+3+3+12, 256),
+            nn.Linear((num_points//4)+3+3, 256),
             nn.ReLU(),
             nn.Linear(256, 128),
             nn.ReLU(),
@@ -511,9 +526,17 @@ class Discriminator(torch.nn.Module):
             nn.Linear(64, 1),
         )
 
-    def forward(self, ray, position, start_point,end_point):
+    # def forward(self, ray, position, start_point,end_point):
+    #     conv_out = self.conv_ray(ray.unsqueeze(dim=1))
+    #     mlp_input = torch.cat([conv_out.squeeze(),position,start_point,end_point],dim=1)
+    #     validity = self.mlp(mlp_input)
+
+    #     return validity
+
+    def forward(self, ray, start_point,end_point):
         conv_out = self.conv_ray(ray.unsqueeze(dim=1))
-        mlp_input = torch.cat([conv_out.squeeze(),position,start_point,end_point],dim=1)
+        # mlp_input = torch.cat([conv_out.squeeze(),position,start_point,end_point],dim=1)
+        mlp_input = torch.cat([conv_out.squeeze(),start_point,end_point],dim=1)
         validity = self.mlp(mlp_input)
 
         return validity
@@ -629,14 +652,8 @@ class NeuralGAN(LightningModule):
         self.loss_fn = torch.nn.MSELoss()
         self.l1_regularization = torch.nn.L1Loss()
 
-        means = torch.tensor([0.,0.1, 1.0],device="cuda")
-        stds = torch.tensor([0.02, 0.02, 0.02],device="cuda")
-        weights = torch.tensor([0.08, 0.099999, 0.1],device="cuda")
-        self.gaussian_loss = GaussianLoss(means, stds, weights)
-
         self.acc_ray = tm.classification.BinaryAccuracy()
         self.acc_slice = tm.classification.BinaryAccuracy()
-        
 
         self.validation_step_outputs = []
         self.validation_step_gt = []
@@ -698,7 +715,6 @@ class NeuralGAN(LightningModule):
         )  # punish model for big changes between adjacent points (to make it smooth)
         loss += self.l1_regularization_weight * smoothness_loss
 
-        # loss += 1e-2 * self.gaussian_loss(attenuation_values).mean()
         
         valid = torch.ones(attenuation_values.size(0), 1, device=self.device)
         valid = valid.type_as(attenuation_values)

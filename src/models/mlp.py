@@ -9,10 +9,10 @@ import torchmetrics as tm
 import tifffile
 from tqdm import tqdm
 
-import tinycudann as tcnn
+# import tinycudann as tcnn
 
 from src import _PATH_DATA, _PATH_MODELS, _PROJECT_ROOT
-
+from src.encoder import get_encoder
 
 def get_activation_function(activation_function, args_dict, **kwargs):
     if activation_function == "relu":
@@ -74,6 +74,17 @@ def compute_projection_values(
 
     return attenuation_sum
 
+class TruncatedLoss(nn.Module):
+    def __init__(self, k):
+        super(TruncatedLoss, self).__init__()
+        self.k = torch.tensor(k, dtype=torch.float32)
+    
+    def forward(self, a, b):
+        diff = torch.abs(a - b)
+        smooth_loss = self.k * torch.tanh((diff / self.k) ** 2)
+        loss = torch.mean(smooth_loss)
+        return loss
+
 
 class NeuralField(LightningModule):
 
@@ -82,13 +93,15 @@ class NeuralField(LightningModule):
         self.save_hyperparameters()
 
         self.projection_shape = projection_shape
+        self.volume_init = args_dict['training']['imagefit_mode']
+        if not self.volume_init:
+            self.latent_lr = args_dict["training"]["latent_lr"]
+            self.full_mode = args_dict["training"]["full_mode"]
+            self.l1_regularization_weight = args_dict["training"]["regularization_weight"]
+            
         self.model_lr = args_dict["training"]["model_lr"]
-        self.latent_lr = args_dict["training"]["latent_lr"]
-        self.full_mode = args_dict["training"]["full_mode"]
         self.data_path = f"{_PATH_DATA}/{args_dict['general']['data_path']}"
         self.batch_size = args_dict["training"]["batch_size"]
-
-        self.l1_regularization_weight = args_dict["training"]["regularization_weight"]
 
         self.num_freq_bands = args_dict["model"]["num_freq_bands"]
         self.num_hidden_layers = args_dict["model"]["num_hidden_layers"]
@@ -120,8 +133,10 @@ class NeuralField(LightningModule):
         
         # Initialising encoder
         if args_dict['model']['encoder'] != None:
-            self.encoder = tcnn.Encoding(n_input_dims=3, encoding_config=config[f"encoding_{args_dict['model']['encoder']}"])
-            num_input_features = self.encoder.n_output_dims
+            self.encoder = get_encoder(args_dict['model']['encoder'])
+            num_input_features = self.encoder.output_dim
+            # self.encoder = tcnn.Encoding(n_input_dims=3, encoding_config=config[f"encoding_{args_dict['model']['encoder']}"])
+            # num_input_features = self.encoder.n_output_dims
         else:
             self.encoder = None
             num_input_features = 3  # x,y,z coordinate
@@ -179,12 +194,16 @@ class NeuralField(LightningModule):
 
         self.loss_fn = torch.nn.MSELoss()
         self.volumefit_loss = torch.nn.L1Loss()
-        self.l1_regularization = torch.nn.L1Loss()
+        self.reg_loss = torch.nn.L1Loss()
         self.validation_step_outputs = []
         self.validation_step_gt = []
 
         self.smallest_train_loss = torch.inf
         self.train_epoch_loss = 0
+
+        self.alpha = 0.2
+
+        
 
     def forward(self, pts):
         pts_shape = pts.shape
@@ -210,8 +229,25 @@ class NeuralField(LightningModule):
 
 
     def training_step(self, batch, batch_idx):
-        # training_step defines the train loop.
-        points, target, idxs = batch
+        if self.volume_init:
+            points, target = batch
+            attenuation_values = self.forward(points).view(target.shape)
+            loss = self.volumefit_loss(attenuation_values, target)
+
+            self.log_dict(
+            {
+                "train/loss": loss,
+            },
+            on_step=True,
+            on_epoch=True,
+            sync_dist=True,
+            batch_size=self.batch_size,
+            )
+
+            return loss
+            
+            
+        points, target = batch
         lengths = torch.linalg.norm((points[:, -1, :] - points[:, 0, :]), dim=1)
         attenuation_values = self.forward(points).view(points.shape[0], points.shape[1])
         detector_value_hat = compute_projection_values(
@@ -220,7 +256,7 @@ class NeuralField(LightningModule):
 
         loss = self.loss_fn(detector_value_hat, target)
 
-        smoothness_loss = self.l1_regularization(
+        smoothness_loss = self.reg_loss(
             attenuation_values[:, 1:], attenuation_values[:, :-1]
         )  # punish model for big changes between adjacent points (to make it smooth)
         loss += self.l1_regularization_weight * smoothness_loss
@@ -238,60 +274,64 @@ class NeuralField(LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        points, target, idxs = batch
-        
-        lengths = torch.linalg.norm((points[:, -1, :] - points[:, 0, :]), dim=1)
-        attenuation_values = self.forward(points).view(points.shape[0], points.shape[1])
-        detector_value_hat = compute_projection_values(
-            points.shape[1], attenuation_values, lengths
-        )
-
-        loss = self.loss_fn(detector_value_hat, target)
-
-        smoothness_loss = self.l1_regularization(
-            attenuation_values[:, 1:], attenuation_values[:, :-1]
-        )  # punish model for big changes between adjacent points (to make it smooth)
-        loss += self.l1_regularization_weight * smoothness_loss
-
-        self.validation_step_outputs.append(detector_value_hat.detach().cpu())
-        self.validation_step_gt.append(target.detach().cpu())
-
-        self.log_dict(
-            {
-                "val/loss": loss,
-            },
-            on_step=False,
-            on_epoch=True,
-            sync_dist=True,
-            batch_size=self.batch_size,
-        )
+        if not self.volume_init:
+            points, target = batch
+            
+            lengths = torch.linalg.norm((points[:, -1, :] - points[:, 0, :]), dim=1)
+            attenuation_values = self.forward(points).view(points.shape[0], points.shape[1])
+            detector_value_hat = compute_projection_values(
+                points.shape[1], attenuation_values, lengths
+            )
+    
+            loss = self.loss_fn(detector_value_hat, target)
+    
+            self.validation_step_outputs.append(detector_value_hat.detach().cpu())
+            self.validation_step_gt.append(target.detach().cpu())
+    
+            self.log_dict(
+                {
+                    "val/loss": loss,
+                },
+                on_step=False,
+                on_epoch=True,
+                sync_dist=True,
+                batch_size=self.batch_size,
+            )
 
     def on_validation_epoch_end(self):
-        all_preds = torch.cat(self.validation_step_outputs)
-        all_gt = torch.cat(self.validation_step_gt)
         vol = self.trainer.val_dataloaders.dataset.vol.to(device=self.device)
         vol_shape = vol.shape
-
-        valid_rays = self.trainer.val_dataloaders.dataset.valid_rays.view(
-            self.projection_shape
-        )
-        preds = torch.zeros(self.projection_shape, dtype=all_preds.dtype)
-        preds[valid_rays] = all_preds
-        gt = torch.zeros(self.projection_shape, dtype=all_gt.dtype)
-        gt[valid_rays] = all_gt
-
-        for i in np.random.randint(0, self.projection_shape[0], 5):
+        if not self.volume_init:
+            all_preds = torch.cat(self.validation_step_outputs)
+            all_gt = torch.cat(self.validation_step_gt)
+            vol = self.trainer.val_dataloaders.dataset.vol.to(device=self.device)
+            vol_shape = vol.shape
+    
+            valid_rays = self.trainer.val_dataloaders.dataset.valid_rays.view(
+                self.projection_shape
+            )
+            preds = torch.zeros(self.projection_shape, dtype=all_preds.dtype)
+            preds[valid_rays] = all_preds
+            gt = torch.zeros(self.projection_shape, dtype=all_gt.dtype)
+            gt[valid_rays] = all_gt
+    
+            # for i in np.random.randint(0, self.projection_shape[0], 5):
+            #     self.logger.log_image(
+            #         key="val/projection",
+            #         images=[preds[i], gt[i], (gt[i] - preds[i])],
+            #         caption=[f"pred_{i}", f"gt_{i}", f"residual_{i}"],
+            #     )  # log projection images
             self.logger.log_image(
                 key="val/projection",
-                images=[preds[i], gt[i], (gt[i] - preds[i])],
-                caption=[f"pred_{i}", f"gt_{i}", f"residual_{i}"],
+                images=[preds[:,:,2], gt[:,:,2], (gt[:,:,2] - preds[:,:,2])],
+                caption=[f"pred", f"gt", f"residual"],
             )  # log projection images
 
         mgrid = torch.stack(
             torch.meshgrid(
                 torch.linspace(-1, 1, vol_shape[0]),
                 torch.linspace(-1, 1, vol_shape[1]),
-                torch.linspace(-1, 1, vol_shape[1]),
+                torch.linspace(-1, 1, vol_shape[2]),
                 indexing="ij",
             ),
             dim=-1,
@@ -312,12 +352,12 @@ class NeuralField(LightningModule):
         self.logger.log_image(
             key="val/reconstruction",
             images=[
-                outputs[vol_shape[2] // 2, :, :],
-                vol[vol_shape[2] // 2, :, :],
-                (vol[vol_shape[2] // 2, :, :] - outputs[vol_shape[2] // 2, :, :]),
-                outputs[:, vol_shape[2] // 2, :],
-                vol[:, vol_shape[2] // 2, :],
-                (vol[:, vol_shape[2] // 2, :] - outputs[:, vol_shape[2] // 2, :]),
+                outputs[:, vol_shape[1] // 2, :],
+                vol[:, vol_shape[1] // 2, :],
+                (vol[:, vol_shape[1] // 2, :] - outputs[:, vol_shape[1] // 2, :]),
+                outputs[vol_shape[0] // 2, :, :],
+                vol[vol_shape[0] // 2, :, :],
+                (vol[vol_shape[0] // 2, :, :] - outputs[vol_shape[0] // 2, :, :]),
                 outputs[:, :, vol_shape[2] // 2],
                 vol[:, :, vol_shape[2] // 2],
                 (vol[:, :, vol_shape[2] // 2] - outputs[:, :, vol_shape[2] // 2]),

@@ -4,7 +4,7 @@
 #BSUB -n 24
 #BSUB -R "span[hosts=1]"
 ##BSUB -gpu "num=1:mode=exclusive_process"
-#BSUB -W 03:00
+#BSUB -W 02:00
 #BSUB -R "rusage[mem=10GB]"
 ##BSUB -R "select[gpu32gb]" #options gpu40gb or gpu80gb
 #BSUB -o gpu_logs/gpu_%J.out
@@ -18,3 +18,5 @@ source ../envs/renner/bin/activate
 # Run main.py --help to get options
 
 python3 create_ray_data.py
+
+# python3 prepare_data.py

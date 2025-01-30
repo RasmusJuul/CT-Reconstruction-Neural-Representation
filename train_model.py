@@ -30,6 +30,9 @@ torch._dynamo.config.suppress_errors = True
 
 
 def main(args_dict):
+    if torch.cuda.get_device_properties(0).total_memory / 2**30 > 60:
+        args_dict["training"]["batch_size"] *= 2
+        
     seed_everything(args_dict["general"]["seed"], workers=True)
     torch.set_float32_matmul_precision("medium")
     time = str(datetime.datetime.now())[:-10].replace(" ", "-").replace(":", "")
@@ -136,7 +139,7 @@ def main(args_dict):
         checkpoint_callback = ModelCheckpoint(
             dirpath=f"{_PATH_MODELS}/{args_dict['general']['experiment_name']}_{args_dict['model']['encoder']}_{args_dict['model']['activation_function']}_latent-size-{args_dict['model']['latent_size']}-{time}",
             filename="MLP-{epoch}",
-            monitor="train/loss",
+            monitor="val/loss",
             mode="min",
             save_top_k=1,
             save_last=True,

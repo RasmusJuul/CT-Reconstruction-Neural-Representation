@@ -28,8 +28,8 @@ torch._dynamo.config.suppress_errors = True
 
 
 def main(args_dict):
-    # if torch.cuda.get_device_properties(0).total_memory / 2**30 > 60:
-    #     args_dict["training"]["batch_size"] *= 2
+    if torch.cuda.get_device_properties(0).total_memory / 2**30 > 60:
+        args_dict["training"]["batch_size"] *= 2
         
     seed_everything(args_dict["general"]["seed"], workers=True)
     torch.set_float32_matmul_precision("medium")
@@ -89,7 +89,7 @@ def main(args_dict):
         accelerator="gpu",
         deterministic=False,
         default_root_dir=_PROJECT_ROOT,
-        precision="32-true",
+        precision="16-mixed", #32-true",
         callbacks=[checkpoint_callback, lr_monitor],
         log_every_n_steps=10,
         logger=wandb_logger,
@@ -188,7 +188,13 @@ if __name__ == "__main__":
         "--regularization-weight",
         type=float,
         default=1e-1,
-        help="weight used to scale the L1 loss of diffenrence between adjacent points on ray",
+        help="weight used to scale the regularization loss of diffenrence between adjacent points on ray",
+    )
+    parser_training.add_argument(
+        "--adversarial-weight",
+        type=float,
+        default=1e-1,
+        help="weight used to scale the adversarial loss",
     )
     parser_training.add_argument(
         "--noise-level",
@@ -258,6 +264,7 @@ if __name__ == "__main__":
             "num_points": args.num_points,
             "noisy_points": args.noisy_points,
             "regularization_weight": args.regularization_weight,
+            "adversarial_weight": args.adversarial_weight,
             "noise_level": args.noise_level,
             "slices": args.slices,
         },

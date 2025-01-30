@@ -4,6 +4,7 @@ import math
 import torch
 import h5py
 import psutil
+import qim3d
 import numpy as np
 import pandas as pd
 import pytorch_lightning as pl
@@ -19,41 +20,35 @@ from src import _PATH_DATA
 def collate_fn(batch):
     points = batch[0]
     targets = batch[1]
-    return points, targets, None
+    return points, targets
 
 
 def collate_fn_imagefit(batch):
     points = batch[0]
     targets = batch[1]
-    img_idxs = batch[2]
-    return points, targets, img_idxs
-
+    return points, targets
 
 def collate_fn_raygan(batch):
     points = batch[0]
     targets = batch[1]
-    position = batch[2]
-    start_points = batch[3]
-    end_points = batch[4]
-    real_ray = batch[5]
-    real_position = batch[6]
-    real_start_points = batch[7]
-    real_end_points = batch[8]
-    return points, targets, position, start_points, end_points, real_ray, real_position, real_start_points, real_end_points
+    start_points = batch[2]
+    end_points = batch[3]
+    real_ray = batch[4]
+    real_start_points = batch[5]
+    real_end_points = batch[6]
+    return points, targets, start_points, end_points, real_ray, real_start_points, real_end_points
 
 def collate_fn_neuralgan(batch):
     points = batch[0]
     targets = batch[1]
-    position = batch[2]
-    start_points = batch[3]
-    end_points = batch[4]
-    real_ray = batch[5]
-    real_position = batch[6]
-    real_start_points = batch[7]
-    real_end_points = batch[8]
-    real_slices = batch[9]
-    embedding = batch[10]
-    return points, targets, position, start_points, end_points, real_ray, real_position, real_start_points, real_end_points, real_slices, embedding
+    start_points = batch[2]
+    end_points = batch[3]
+    real_ray = batch[4]
+    real_start_points = batch[5]
+    real_end_points = batch[6]
+    real_slices = batch[7]
+    embedding = batch[8]
+    return points, targets, start_points, end_points, real_ray, real_start_points, real_end_points, real_slices, embedding
 
 class Geometry(torch.nn.Module):
     def __init__(
@@ -92,23 +87,6 @@ class Geometry(torch.nn.Module):
         self.v_vec = detector_pixel_size[3:]
         self.beam_type = beam_type
         self.object_shape = object_shape
-
-        # Convert into relative coordinates
-        self.source_pos[0] /= self.object_shape[0] / 2
-        self.source_pos[1] /= self.object_shape[1] / 2
-        self.source_pos[2] /= self.object_shape[2] / 2
-
-        self.detector_pos[0] /= self.object_shape[0] / 2
-        self.detector_pos[1] /= self.object_shape[1] / 2
-        self.detector_pos[2] /= self.object_shape[2] / 2
-
-        self.u_vec[0] /= self.object_shape[0] / 2
-        self.u_vec[1] /= self.object_shape[1] / 2
-        self.u_vec[2] /= self.object_shape[2] / 2
-
-        self.v_vec[0] /= self.object_shape[0] / 2
-        self.v_vec[1] /= self.object_shape[1] / 2
-        self.v_vec[2] /= self.object_shape[2] / 2
         
         self.detector_pixel_coordinates = self.create_grid(
             self.detector_pos,
@@ -129,7 +107,7 @@ class Geometry(torch.nn.Module):
             )
             self.rays = self.detector_pixel_coordinates - self.source_pos
             
-            self.start_points, self.end_points, self.valid_rays = self.intersect_cube(
+            self.start_points, self.end_points, self.valid_rays = self.intersect_box(
                 self.source_pos.view(-1, 3),
                 self.rays.view(-1, 3),
             )
@@ -137,7 +115,7 @@ class Geometry(torch.nn.Module):
         elif self.beam_type == "cone":
             self.rays = self.detector_pixel_coordinates - self.source_pos
             
-            self.start_points, self.end_points, self.valid_rays = self.intersect_cube(
+            self.start_points, self.end_points, self.valid_rays = self.intersect_box(
                 self.source_pos.repeat(self.detector_size[0] * self.detector_size[1]).view(
                     -1, 3
                 ),
@@ -147,49 +125,52 @@ class Geometry(torch.nn.Module):
         self.start_points = self.start_points[self.valid_rays]
         self.end_points = self.end_points[self.valid_rays]
 
-    def intersect_cube(self, ray_origins, ray_directions):
+    def intersect_box(self, ray_origins, ray_directions):
         """
-        Calculate the intersection points of a ray with a cube in 3D space.
-
-        This function assumes that the cube is centered at the origin and has a side length of 2 (from -1 to 1 on all axes).
-        The rays are defined by starting points and directions stored in PyTorch tensors.
-
+        Calculate the intersection points of a ray with a box in 3D space,
+        and normalize them to the range [-1, 1].
+        
         Parameters:
-        ray_origins (torch.Tensor): A tensor of shape (N, 3) where N is the number of rays, and each ray is defined by its origin (x, y, z).
-        ray_directions (torch.Tensor): A tensor of shape (N, 3) where N is the number of rays, and each ray is defined by its direction (dx, dy, dz).
-
+        ray_origins (torch.Tensor): Tensor of shape (N, 3) representing ray origins.
+        ray_directions (torch.Tensor): Tensor of shape (N, 3) representing ray directions.
+    
         Returns:
-        entry_points (torch.Tensor): A tensor of shape (N, 3) representing the entry points of the rays on the cube.
-        exit_points (torch.Tensor): A tensor of shape (N, 3) representing the exit points of the rays from the cube.
-        valid_rays (torch.Tensor): A tensor of shape (N,) where each element is a boolean indicating whether the corresponding ray intersects the cube.
+        entry_points (torch.Tensor): Normalized entry points of the rays on the box.
+        exit_points (torch.Tensor): Normalized exit points of the rays from the box.
+        valid_rays (torch.Tensor): Boolean tensor indicating whether the rays intersect the box.
         """
-        # Define the cube boundaries
-        cube_min = -1
-        cube_max = 1
-
-        # Calculate the intersection t value for each axis
-        t_min = (cube_min - ray_origins) / ray_directions
-        t_max = (cube_max - ray_origins) / ray_directions
-
+        # Define the box boundaries in physical coordinates
+        box_min = -torch.tensor(self.object_shape, dtype=ray_origins.dtype, device=ray_origins.device) / 2
+        box_max = torch.tensor(self.object_shape, dtype=ray_origins.dtype, device=ray_origins.device) / 2
+    
+        # Calculate the intersection t values for each axis
+        t_min = (box_min - ray_origins) / ray_directions
+        t_max = (box_max - ray_origins) / ray_directions
+    
         # Reorder t_min and t_max for each axis
         t_min, t_max = torch.where(t_min > t_max, t_max, t_min), torch.where(
             t_min > t_max, t_min, t_max
         )
+    
 
         # Get the maximum of t_min and the minimum of t_max
         t_near = torch.max(t_min, dim=1).values
         t_far = torch.min(t_max, dim=1).values
-
-        # Create a tensor to store whether each ray intersects the cube
+    
+        # Create a tensor to store whether each ray intersects the box
         valid_rays = t_near < t_far
-        valid_rays = valid_rays & (t_far >= cube_min)
-
+        valid_rays = valid_rays & (t_far >= 0)
+    
         # Calculate the intersection points for the valid rays
         entry_points = ray_origins + t_near.unsqueeze(-1) * ray_directions
         exit_points = ray_origins + t_far.unsqueeze(-1) * ray_directions
-
-        # Return the intersection points and the valid rays tensor
-        return entry_points, exit_points, valid_rays
+    
+        # Normalize points to the range [-1, 1]
+        normalization_factor = torch.tensor(self.object_shape, dtype=ray_origins.dtype, device=ray_origins.device) / 2
+        entry_points_normalized = entry_points / normalization_factor
+        exit_points_normalized = exit_points / normalization_factor
+    
+        return entry_points_normalized, exit_points_normalized, valid_rays
 
     def create_grid(self, detector_pos, u_vec, v_vec, u_size, v_size):
         # Initialize the grid
@@ -235,9 +216,22 @@ class CTpoints(torch.utils.data.Dataset):
         if "filaments_volumes" in data_path:
             with h5py.File(f"{_PATH_DATA}/FiberDataset/filaments_volumes.hdf5", 'r') as f:
                 self.vol = torch.from_numpy(f["volumes"][0,:,:,:]).permute(2,1,0)
+                object_shape = self.vol.shape
         elif "synthetic_fibers" in data_path:
             with h5py.File(f"{_PATH_DATA}/synthetic_fibers/test.hdf5", 'r') as f:
                 self.vol = torch.from_numpy(f["volumes"][int(data_path.split("_")[-1]),:,:,:]).permute(2,1,0)
+                object_shape = self.vol.shape
+        elif "bugnist_256" in data_path:
+            with h5py.File(f"{_PATH_DATA}/bugnist_256/SL_cubed.hdf5", 'r') as f:
+                self.vol = torch.from_numpy(f["volumes"][int(data_path.split("_")[-1]),:,:,:]).permute(2,1,0)
+                object_shape = self.vol.shape
+        elif "Task07_Pancreas" in data_path:
+            with h5py.File(f"{_PATH_DATA}/Task07_Pancreas/train.hdf5", 'r') as f:
+                self.vol = torch.from_numpy(f["volumes"][25+int(data_path.split("_")[-1]),:,:,:]).permute(1,2,0)[:,47:52,:]
+                # object_shape = np.array([5,512,512])
+                object_shape = self.vol.shape
+        elif "pasta" in data_path:
+            self.vol = torch.zeros((1120,1120,1912))
         else:
             vol = torch.tensor(tifffile.imread(f"{data_path}.tif"))
             vol -= vol.min()
@@ -249,7 +243,6 @@ class CTpoints(torch.utils.data.Dataset):
         detector_pixel_size = torch.tensor(positions[:, 6:])
 
         source_pos = torch.tensor(positions[:, :3])
-        object_shape = self.vol.shape
 
         self.end_points = [None] * positions.shape[0]
         self.start_points = [None] * positions.shape[0]
@@ -435,9 +428,19 @@ class CTpointsWithRays(torch.utils.data.Dataset):
         if "filaments_volumes" in data_path:
             with h5py.File(f"{_PATH_DATA}/FiberDataset/filaments_volumes.hdf5", 'r') as f:
                 self.vol = torch.from_numpy(f["volumes"][int(data_path.split("_")[-1]),:,:,:]).permute(2,1,0)
+                object_shape = self.vol.shape
         elif "synthetic_fibers" in data_path:
             with h5py.File(f"{_PATH_DATA}/synthetic_fibers/test.hdf5", 'r') as f:
                 self.vol = torch.from_numpy(f["volumes"][int(data_path.split("_")[-1]),:,:,:]).permute(2,1,0)
+                object_shape = self.vol.shape
+        elif "bugnist_256" in data_path:
+            with h5py.File(f"{_PATH_DATA}/bugnist_256/SL_cubed.hdf5", 'r') as f:
+                self.vol = torch.from_numpy(f["volumes"][int(data_path.split("_")[-1]),:,:,:]).permute(2,1,0)
+                object_shape = self.vol.shape
+        elif "Task07_Pancreas" in data_path:
+            with h5py.File(f"{_PATH_DATA}/Task07_Pancreas/train.hdf5", 'r') as f:
+                self.vol = torch.from_numpy(f["volumes"][100+int(data_path.split("_")[-1]),:,:,:]).permute(0,2,1)[:,47:52,:]
+                object_shape = self.vol.shape
         else:
             vol = torch.tensor(tifffile.imread(f"{data_path}.tif"))
             vol -= vol.min()
@@ -449,12 +452,11 @@ class CTpointsWithRays(torch.utils.data.Dataset):
         detector_pixel_size = torch.tensor(positions[:, 6:])
 
         source_pos = torch.tensor(positions[:, :3])
-        object_shape = self.vol.shape
+        
 
         self.end_points = [None] * positions.shape[0]
         self.start_points = [None] * positions.shape[0]
         self.valid_rays = [None] * positions.shape[0]
-        self.positions = [None] * positions.shape[0]
 
         for i in tqdm(range(positions.shape[0]), desc="Generating points from rays"):
             geometry = Geometry(
@@ -468,12 +470,10 @@ class CTpointsWithRays(torch.utils.data.Dataset):
             self.end_points[i] = geometry.end_points
             self.start_points[i] = geometry.start_points
             self.valid_rays[i] = geometry.valid_rays
-            self.positions[i] = torch.from_numpy(np.array([positions[i]] * geometry.start_points.shape[0]))
 
         self.end_points = torch.cat(self.end_points).view(-1, 3)
         self.start_points = torch.cat(self.start_points).view(-1, 3)
         self.valid_rays = torch.cat(self.valid_rays)
-        self.positions = torch.cat(self.positions)
         
         self.real_ray_path = self.args['general']['ray_data_path']
         
@@ -481,15 +481,16 @@ class CTpointsWithRays(torch.utils.data.Dataset):
         total_memory = psutil.virtual_memory().total / (1024 ** 3)
         if total_memory > 140:
             print("loading ray data into ram")
-            self.real_positions = h5py.File(self.real_ray_path, 'r')["position"][:]
             self.real_start_points = h5py.File(self.real_ray_path, 'r')["start_point"][:]
             self.real_end_points = h5py.File(self.real_ray_path, 'r')["end_point"][:]
             self.real_rays = h5py.File(self.real_ray_path, 'r')["ray"][:]
+            self.loaded_rays_into_ram = True
         else:
-            self.real_positions = None
+            # self.real_positions = None
             self.real_start_points = None
             self.real_end_points = None
             self.real_rays = None
+            self.loaded_rays_into_ram = False
 
         
         
@@ -523,7 +524,6 @@ class CTpointsWithRays(torch.utils.data.Dataset):
     def __getitems__(self, idx):
         end_points = self.end_points[idx]
         start_points = self.start_points[idx]
-        position = self.positions[idx]
         points, step_size = self.sample_points(
             start_points, end_points, self.args["training"]["num_points"]
         )
@@ -536,19 +536,16 @@ class CTpointsWithRays(torch.utils.data.Dataset):
 
         points = points.contiguous().to(dtype=torch.float)
         targets = targets.contiguous().to(dtype=torch.float)
-        position = position.contiguous().to(dtype=torch.float)
         start_points = start_points.contiguous().to(dtype=torch.float)
         end_points = end_points.contiguous().to(dtype=torch.float)
 
-        if self.real_rays == None:
-            self.real_positions = h5py.File(self.real_ray_path, 'r')["position"]
+        if not self.loaded_rays_into_ram:
             self.real_start_points = h5py.File(self.real_ray_path, 'r')["start_point"]
             self.real_end_points = h5py.File(self.real_ray_path, 'r')["end_point"]
             self.real_rays = h5py.File(self.real_ray_path, 'r')["ray"]
 
         sample_idx = np.sort(np.random.choice(self.real_rays.shape[0],self.args["training"]["batch_size"],replace=False))
         real_ray = torch.from_numpy(self.real_rays[sample_idx]).contiguous().to(dtype=torch.float)
-        real_position = torch.from_numpy(self.real_positions[sample_idx]).contiguous().to(dtype=torch.float)
         real_start_points = torch.from_numpy(self.real_start_points[sample_idx]).contiguous().to(dtype=torch.float)
         real_end_points = torch.from_numpy(self.real_end_points[sample_idx]).contiguous().to(dtype=torch.float)
 
@@ -584,9 +581,10 @@ class CTpointsWithRays(torch.utils.data.Dataset):
             self.counter_for_slices += 1
             if self.counter_for_slices == self.volume_idxs.shape[0]:
                 self.counter_for_slices = 0
-            return points, targets, position, start_points, end_points, real_ray, real_position, real_start_points, real_end_points, real_slices, embedding
+            return points, targets, start_points, end_points, real_ray, real_start_points, real_end_points, real_slices, embedding
         
-        return points, targets, position, start_points, end_points, real_ray, real_position, real_start_points, real_end_points
+        
+        return points, targets, start_points, end_points, real_ray, real_start_points, real_end_points
 
 class CTRayDataModule(pl.LightningDataModule):
     def __init__(
@@ -646,7 +644,7 @@ class CTRayDataModule(pl.LightningDataModule):
                 shuffle=shuffle,
                 drop_last=True,
                 persistent_workers=True,
-                prefetch_factor=10,
+                prefetch_factor=20,
                 collate_fn=collate_fn_neuralgan,
             )
         else:
@@ -668,7 +666,7 @@ class CTRayDataModule(pl.LightningDataModule):
                 shuffle=shuffle,
                 drop_last=True,
                 persistent_workers=True,
-                prefetch_factor=10,
+                prefetch_factor=20,
                 collate_fn=collate_fn_raygan,
             )
             
@@ -691,9 +689,9 @@ class CTRayDataModule(pl.LightningDataModule):
                 batch_size=self.batch_size,
                 num_workers=self.args["training"]["num_workers"],
                 pin_memory=True,
-                prefetch_factor=5,
+                prefetch_factor=10,
                 collate_fn=collate_fn_neuralgan,
-                # persistent_workers=True,
+                persistent_workers=True,
             )
         else:
             if notebook:
@@ -709,9 +707,9 @@ class CTRayDataModule(pl.LightningDataModule):
                 batch_size=self.batch_size,
                 num_workers=self.args["training"]["num_workers"],
                 pin_memory=True,
-                prefetch_factor=5,
+                prefetch_factor=10,
                 collate_fn=collate_fn_raygan,
-                # persistent_workers=True,
+                persistent_workers=True,
             )
 
     def test_dataloader(self):
@@ -729,19 +727,11 @@ class CTRayDataModule(pl.LightningDataModule):
 class Imagefit(torch.utils.data.Dataset):
     def __init__(self, args_dict, split="train"):
 
-        if "/tmp/" in args_dict['general']['data_path']:
-            self.file_path = f"{args_dict['general']['data_path']}"
-        else:
-            self.file_path = f"{_PATH_DATA}/{args_dict['general']['data_path']}"
-
-        if ".hdf5" in self.file_path:
-            self.number_of_volumes = h5py.File(f"{self.file_path}", "r")["volumes"].shape[0]
-        else:
-            files = pd.read_csv(f"{self.file_path}/{split}.csv", header=0)
-            self.image_paths = files.file_path.to_list()
-            self.number_of_volumes = len(self.image_paths)
-            
-        self.volume_sidelength = args_dict["model"]["volume_sidelength"]
+        self.file_path = f"{_PATH_DATA}/{args_dict['general']['data_path']}"
+        self.vol = torch.tensor(qim3d.io.load(self.file_path)).permute(2,1,0)
+        self.vol -= self.vol.min()
+        self.vol = self.vol/self.vol.max()
+        self.volume_sidelength = self.vol.shape
 
         self.mgrid = torch.stack(
             torch.meshgrid(
@@ -753,55 +743,18 @@ class Imagefit(torch.utils.data.Dataset):
             dim=-1,
         )
         # self.mgrid = self.mgrid.view(-1,self.volume_sidelength,3)
-        self.dataset = None
 
     def __len__(self):
-        return self.number_of_volumes * self.mgrid.shape[2]
-
-    def __getitem__(self, idx):
-        img_idx = idx // self.mgrid.shape[2]
-        grid_idx = idx % self.mgrid.shape[2]
-
-        points = self.mgrid[grid_idx]
-
-        if self.dataset is None:
-            self.dataset = h5py.File(f"{self.file_path}/train.hdf5", "r")["volumes"]
-
-        targets = torch.tensor(self.dataset[img_idx][grid_idx])
-
-        return points, targets, img_idx
+        return self.mgrid.shape[2]
 
     def __getitems__(self, idx):
         idx = torch.tensor(idx)
-        img_idxs = idx // self.mgrid.shape[2]
-        grid_idxs = idx % self.mgrid.shape[2]
+        points = self.mgrid[:, :, idx]
+        targets = self.vol[:,:,idx]
 
-        points = self.mgrid[:, :, grid_idxs]
-        targets = torch.zeros(
-            self.volume_sidelength[0],
-            self.volume_sidelength[1],
-            *idx.shape,
-            dtype=torch.float32,
-        )
-        if self.dataset is None:
-            if ".hdf5" in self.file_path:
-                self.dataset = h5py.File(f"{self.file_path}", "r")["volumes"]
-            else:
-                self.dataset = h5py.File(f"{self.file_path}/train_small.hdf5", "r")["volumes"]
-
-        for img_idx in img_idxs.unique():
-            temp = torch.tensor(
-                self.dataset[img_idx][:, :, grid_idxs[img_idxs == img_idx]]
-            )
-            if temp.dtype != torch.float32:
-                temp = temp.to(dtype=torch.float32)
-            if len(temp.shape) < 3:
-                temp = temp.unsqueeze(dim=-1)
-            targets[:, :, img_idxs == img_idx] = temp
-
-        targets = targets.to(dtype=torch.float).permute(2, 1, 0).contiguous()
-        points = points.to(dtype=torch.float).permute(2, 1, 0, 3).contiguous()
-        return points, targets, img_idxs
+        targets = targets.to(dtype=torch.float).contiguous()
+        points = points.to(dtype=torch.float).contiguous()
+        return points, targets
 
 
 class ImagefitDataModule(pl.LightningDataModule):
@@ -810,7 +763,7 @@ class ImagefitDataModule(pl.LightningDataModule):
         args_dict,
     ):
         """
-        Initializes the BugNISTDataModule.
+        Initializes the DataModule.
 
         Parameters
         ----------
