@@ -60,24 +60,7 @@ class Geometry(torch.nn.Module):
         object_shape,
         beam_type="cone",
     ):
-        """
-        Parameters
-        ----------
-        source_pos : torch.Tensor
-            ray source position x,y,z position in relation to sample
-        detector_pos : torch.Tensor
-            center of detector x,y,z position in relation to sample
-        detector_size : Sequence[int]
-            Shape of detector in pixels e.g. (300,300)
-        detector_pixel_size : Sequence[torch.Tensor]
-            Two vectors defining the size of the pixels
-            u : the vector from detector pixel (0,0) to (0,1)
-            v : the vector from detector pixel (0,0) to (1,0)
-        object_shape: Sequence[int]
-            shape of object in um, i.e. an object which has the dimensions 200x200x300um has the shape [200,200,300]
-        beam_type : str
-            Which beam type to use for calculating projection. Default 'cone'
-        """
+        # Initialization code remains the same
         super(Geometry, self).__init__()
         self.source_pos = source_pos
         self.detector_pos = detector_pos
@@ -86,7 +69,7 @@ class Geometry(torch.nn.Module):
         self.u_vec = detector_pixel_size[:3]
         self.v_vec = detector_pixel_size[3:]
         self.beam_type = beam_type
-        self.object_shape = object_shape
+        self.object_shape = torch.tensor(object_shape)  # Convert torch.Size to torch.Tensor
         
         self.detector_pixel_coordinates = self.create_grid(
             self.detector_pos,
@@ -96,7 +79,6 @@ class Geometry(torch.nn.Module):
             self.detector_size[1],
         )
 
-        
         if self.beam_type == "parallel":
             self.source_pos = self.create_grid(
                 self.source_pos,
@@ -140,8 +122,8 @@ class Geometry(torch.nn.Module):
         valid_rays (torch.Tensor): Boolean tensor indicating whether the rays intersect the box.
         """
         # Define the box boundaries in physical coordinates
-        box_min = -torch.tensor(self.object_shape, dtype=ray_origins.dtype, device=ray_origins.device) / 2
-        box_max = torch.tensor(self.object_shape, dtype=ray_origins.dtype, device=ray_origins.device) / 2
+        box_min = -self.object_shape / 2
+        box_max = self.object_shape / 2
     
         # Calculate the intersection t values for each axis
         t_min = (box_min - ray_origins) / ray_directions
@@ -152,7 +134,6 @@ class Geometry(torch.nn.Module):
             t_min > t_max, t_min, t_max
         )
     
-
         # Get the maximum of t_min and the minimum of t_max
         t_near = torch.max(t_min, dim=1).values
         t_far = torch.min(t_max, dim=1).values
@@ -166,32 +147,37 @@ class Geometry(torch.nn.Module):
         exit_points = ray_origins + t_far.unsqueeze(-1) * ray_directions
     
         # Normalize points to the range [-1, 1]
-        normalization_factor = torch.tensor(self.object_shape, dtype=ray_origins.dtype, device=ray_origins.device) / 2
+        normalization_factor = self.object_shape / 2
         entry_points_normalized = entry_points / normalization_factor
         exit_points_normalized = exit_points / normalization_factor
+
+        # Set the coordinates of the size 1 axis to 0
+        size_1_axis = (self.object_shape == 1).nonzero(as_tuple=True)[0]
+        entry_points_normalized[:, size_1_axis] = 0
+        exit_points_normalized[:, size_1_axis] = 0
     
         return entry_points_normalized, exit_points_normalized, valid_rays
 
     def create_grid(self, detector_pos, u_vec, v_vec, u_size, v_size):
         # Initialize the grid
         detector_pixels = torch.zeros((u_size, v_size, 3))
-
+    
         # Calculate the starting point of the grid
         start_pos = (
             detector_pos
             - (u_size // 2) * u_vec
             - (v_size // 2) * v_vec
-            + u_vec / 2
-            + v_vec / 2
+            + (u_vec / 2 if u_size % 2 == 0 else 0)
+            + (v_vec / 2 if v_size % 2 == 0 else 0)
         )
-
+    
         # Create ranges for u and v
         u_range = torch.arange(u_size).view(-1, 1, 1)
         v_range = torch.arange(v_size).view(1, -1, 1)
-
+    
         # Fill the grid using broadcasting and vectorized operations
         detector_pixels = start_pos + u_range * u_vec + v_range * v_vec
-
+    
         return detector_pixels
 
 
@@ -216,20 +202,15 @@ class CTpoints(torch.utils.data.Dataset):
         if "filaments_volumes" in data_path:
             with h5py.File(f"{_PATH_DATA}/FiberDataset/filaments_volumes.hdf5", 'r') as f:
                 self.vol = torch.from_numpy(f["volumes"][0,:,:,:]).permute(2,1,0)
-                object_shape = self.vol.shape
         elif "synthetic_fibers" in data_path:
             with h5py.File(f"{_PATH_DATA}/synthetic_fibers/test.hdf5", 'r') as f:
                 self.vol = torch.from_numpy(f["volumes"][int(data_path.split("_")[-1]),:,:,:]).permute(2,1,0)
-                object_shape = self.vol.shape
         elif "bugnist_256" in data_path:
             with h5py.File(f"{_PATH_DATA}/bugnist_256/SL_cubed.hdf5", 'r') as f:
                 self.vol = torch.from_numpy(f["volumes"][int(data_path.split("_")[-1]),:,:,:]).permute(2,1,0)
-                object_shape = self.vol.shape
         elif "Task07_Pancreas" in data_path:
             with h5py.File(f"{_PATH_DATA}/Task07_Pancreas/train.hdf5", 'r') as f:
-                self.vol = torch.from_numpy(f["volumes"][25+int(data_path.split("_")[-1]),:,:,:]).permute(1,2,0)[:,47:52,:]
-                # object_shape = np.array([5,512,512])
-                object_shape = self.vol.shape
+                self.vol = torch.from_numpy(f["volumes"][100+int(data_path.split("_")[-1]),:,:,:]).permute(1,2,0)[:,49:50,:]
         elif "pasta" in data_path:
             self.vol = torch.zeros((1120,1120,1912))
         else:
@@ -243,10 +224,12 @@ class CTpoints(torch.utils.data.Dataset):
         detector_pixel_size = torch.tensor(positions[:, 6:])
 
         source_pos = torch.tensor(positions[:, :3])
+        object_shape = torch.tensor(self.vol.shape)
 
         self.end_points = [None] * positions.shape[0]
         self.start_points = [None] * positions.shape[0]
         self.valid_rays = [None] * positions.shape[0]
+        self.detector_pixel_coordinates = [None] * positions.shape[0]
 
         for i in tqdm(range(positions.shape[0]), desc="Generating points from rays"):
             geometry = Geometry(
@@ -260,10 +243,12 @@ class CTpoints(torch.utils.data.Dataset):
             self.end_points[i] = geometry.end_points
             self.start_points[i] = geometry.start_points
             self.valid_rays[i] = geometry.valid_rays
+            self.detector_pixel_coordinates[i] = geometry.detector_pixel_coordinates
 
         self.end_points = torch.cat(self.end_points).view(-1, 3)
         self.start_points = torch.cat(self.start_points).view(-1, 3)
         self.valid_rays = torch.cat(self.valid_rays)
+        self.detector_pixel_coordinates = torch.cat(self.detector_pixel_coordinates)
 
         self.noisy = noisy_points
 
@@ -428,19 +413,15 @@ class CTpointsWithRays(torch.utils.data.Dataset):
         if "filaments_volumes" in data_path:
             with h5py.File(f"{_PATH_DATA}/FiberDataset/filaments_volumes.hdf5", 'r') as f:
                 self.vol = torch.from_numpy(f["volumes"][int(data_path.split("_")[-1]),:,:,:]).permute(2,1,0)
-                object_shape = self.vol.shape
         elif "synthetic_fibers" in data_path:
             with h5py.File(f"{_PATH_DATA}/synthetic_fibers/test.hdf5", 'r') as f:
                 self.vol = torch.from_numpy(f["volumes"][int(data_path.split("_")[-1]),:,:,:]).permute(2,1,0)
-                object_shape = self.vol.shape
         elif "bugnist_256" in data_path:
             with h5py.File(f"{_PATH_DATA}/bugnist_256/SL_cubed.hdf5", 'r') as f:
                 self.vol = torch.from_numpy(f["volumes"][int(data_path.split("_")[-1]),:,:,:]).permute(2,1,0)
-                object_shape = self.vol.shape
         elif "Task07_Pancreas" in data_path:
             with h5py.File(f"{_PATH_DATA}/Task07_Pancreas/train.hdf5", 'r') as f:
-                self.vol = torch.from_numpy(f["volumes"][100+int(data_path.split("_")[-1]),:,:,:]).permute(0,2,1)[:,47:52,:]
-                object_shape = self.vol.shape
+                self.vol = torch.from_numpy(f["volumes"][100+int(data_path.split("_")[-1]),:,:,:]).permute(1,2,0)[:,49:50,:]
         else:
             vol = torch.tensor(tifffile.imread(f"{data_path}.tif"))
             vol -= vol.min()
@@ -452,7 +433,7 @@ class CTpointsWithRays(torch.utils.data.Dataset):
         detector_pixel_size = torch.tensor(positions[:, 6:])
 
         source_pos = torch.tensor(positions[:, :3])
-        
+        object_shape = torch.tensor(self.vol.shape)
 
         self.end_points = [None] * positions.shape[0]
         self.start_points = [None] * positions.shape[0]
