@@ -38,18 +38,6 @@ def collate_fn_raygan(batch):
     real_end_points = batch[6]
     return points, targets, start_points, end_points, real_ray, real_start_points, real_end_points
 
-def collate_fn_neuralgan(batch):
-    points = batch[0]
-    targets = batch[1]
-    start_points = batch[2]
-    end_points = batch[3]
-    real_ray = batch[4]
-    real_start_points = batch[5]
-    real_end_points = batch[6]
-    real_slices = batch[7]
-    embedding = batch[8]
-    return points, targets, start_points, end_points, real_ray, real_start_points, real_end_points, real_slices, embedding
-
 class Geometry(torch.nn.Module):
     def __init__(
         self,
@@ -529,41 +517,6 @@ class CTpointsWithRays(torch.utils.data.Dataset):
         real_ray = torch.from_numpy(self.real_rays[sample_idx]).contiguous().to(dtype=torch.float)
         real_start_points = torch.from_numpy(self.real_start_points[sample_idx]).contiguous().to(dtype=torch.float)
         real_end_points = torch.from_numpy(self.real_end_points[sample_idx]).contiguous().to(dtype=torch.float)
-
-        if self.slices:
-            # Loading of slices
-            if self.dataset is None:
-                if "bugnist_256" in self.file_path:
-                    self.dataset = h5py.File(f"{'/'.join(self.real_ray_path.split('/')[:-1])}/SL_cubed_clean.hdf5", "r")["volumes"]
-                    # don't sample the training volume so avoid soldat_16_000 (idx 198), manual for now
-                    self.volume_idxs = np.append(np.arange(198),np.arange(self.dataset.shape[0])[199:])
-                elif "filaments_volumes" in self.file_path:
-                    self.dataset = h5py.File(f"{'/'.join(self.real_ray_path.split('/')[:-1])}/filaments_volumes.hdf5", "r")["volumes"]
-                    file_number = int(self.args['general']['data_path'].split("_")[-1])
-                    self.volume_idxs = np.append(np.arange(file_number),np.arange(self.dataset.shape[0])[file_number+1:])
-                elif "synthetic_fibers" in self.file_path:
-                    self.dataset = h5py.File(f"{'/'.join(self.real_ray_path.split('/')[:-1])}/train.hdf5", "r")["volumes"]
-                    self.volume_idxs = np.arange(self.dataset.shape[0])
-
-            embedding = torch.tensor([[np.random.rand(1)[0],0,0],
-                                      [0,np.random.rand(1)[0],0],
-                                      [0,0,np.random.rand(1)[0]]], dtype=torch.float)
-            slice_volume = torch.from_numpy(self.dataset[self.volume_idxs[self.counter_for_slices]]).permute(2,1,0)
-            slice_volume_shape = slice_volume.shape
-
-            # take the random slice in each direction from a volume
-            real_slices = torch.stack((slice_volume[int(slice_volume_shape[0]*embedding[0,0]),:,:],
-                                       slice_volume[:,int(slice_volume_shape[1]*embedding[1,1]),:],
-                                       slice_volume[:,:,int(slice_volume_shape[2]*embedding[2,2])])
-                                     ).unsqueeze(dim=1).contiguous().to(dtype=torch.float)
-           
-            
-            # Increase counter, and reset when counter reaches the number of volumes available
-            self.counter_for_slices += 1
-            if self.counter_for_slices == self.volume_idxs.shape[0]:
-                self.counter_for_slices = 0
-            return points, targets, start_points, end_points, real_ray, real_start_points, real_end_points, real_slices, embedding
-        
         
         return points, targets, start_points, end_points, real_ray, real_start_points, real_end_points
 
@@ -606,17 +559,7 @@ class CTRayDataModule(pl.LightningDataModule):
         Returns the training data loader.
         """
         
-        if self.args['training']['slices']:
-            if notebook:
-                return DataLoader(
-                    self.train_dataset,
-                    batch_size=self.batch_size,
-                    num_workers=self.args["training"]["num_workers"],
-                    pin_memory=True,
-                    shuffle=shuffle,
-                    drop_last=True,
-                    collate_fn=collate_fn_neuralgan,
-                )
+        if notebook:
             return DataLoader(
                 self.train_dataset,
                 batch_size=self.batch_size,
@@ -624,74 +567,43 @@ class CTRayDataModule(pl.LightningDataModule):
                 pin_memory=True,
                 shuffle=shuffle,
                 drop_last=True,
-                persistent_workers=True,
-                prefetch_factor=20,
-                collate_fn=collate_fn_neuralgan,
-            )
-        else:
-            if notebook:
-                return DataLoader(
-                    self.train_dataset,
-                    batch_size=self.batch_size,
-                    num_workers=self.args["training"]["num_workers"],
-                    pin_memory=True,
-                    shuffle=shuffle,
-                    drop_last=True,
-                    collate_fn=collate_fn_raygan,
-                )
-            return DataLoader(
-                self.train_dataset,
-                batch_size=self.batch_size,
-                num_workers=self.args["training"]["num_workers"],
-                pin_memory=True,
-                shuffle=shuffle,
-                drop_last=True,
-                persistent_workers=True,
-                prefetch_factor=20,
                 collate_fn=collate_fn_raygan,
             )
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.args["training"]["num_workers"],
+            pin_memory=True,
+            shuffle=shuffle,
+            drop_last=True,
+            persistent_workers=True,
+            prefetch_factor=20,
+            collate_fn=collate_fn_raygan,
+        )
             
 
     def val_dataloader(self, notebook=False):
         """
         Returns the validation data loader.
         """
-        if self.args['training']['slices']:
-            if notebook:
-                return DataLoader(
-                    self.validation_dataset,
-                    batch_size=self.batch_size,
-                    num_workers=self.args["training"]["num_workers"],
-                    pin_memory=True,
-                    collate_fn=collate_fn_neuralgan,
-                )
+        
+        if notebook:
             return DataLoader(
                 self.validation_dataset,
                 batch_size=self.batch_size,
                 num_workers=self.args["training"]["num_workers"],
                 pin_memory=True,
-                prefetch_factor=10,
-                collate_fn=collate_fn_neuralgan,
-                persistent_workers=True,
-            )
-        else:
-            if notebook:
-                return DataLoader(
-                    self.validation_dataset,
-                    batch_size=self.batch_size,
-                    num_workers=self.args["training"]["num_workers"],
-                    pin_memory=True,
-                    collate_fn=collate_fn_raygan,
-                )
-            return DataLoader(
-                self.validation_dataset,
-                batch_size=self.batch_size,
-                num_workers=self.args["training"]["num_workers"],
-                pin_memory=True,
-                prefetch_factor=10,
                 collate_fn=collate_fn_raygan,
-                persistent_workers=True,
             )
+        return DataLoader(
+            self.validation_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.args["training"]["num_workers"],
+            pin_memory=True,
+            prefetch_factor=10,
+            collate_fn=collate_fn_raygan,
+            persistent_workers=True,
+        )
 
     def test_dataloader(self):
         """

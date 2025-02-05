@@ -9,82 +9,9 @@ import torchmetrics as tm
 import tifffile
 from tqdm import tqdm
 
-# import tinycudann as tcnn
-
 from src import _PATH_DATA, _PATH_MODELS, _PROJECT_ROOT
 from src.encoder import get_encoder
-
-def get_activation_function(activation_function, args_dict, **kwargs):
-    if activation_function == "relu":
-        return torch.nn.ReLU(**kwargs)
-    elif activation_function == "leaky_relu":
-        return torch.nn.LeakyReLU(**kwargs)
-    elif activation_function == "sigmoid":
-        return torch.nn.Sigmoid(**kwargs)
-    elif activation_function == "tanh":
-        return torch.nn.Tanh(**kwargs)
-    elif activation_function == "elu":
-        return torch.nn.ELU(**kwargs)
-    elif activation_function == "none":
-        return torch.nn.Identity(**kwargs)
-    elif activation_function == "sine":
-        return torch.jit.script(Sine(**kwargs)).to(
-            device=args_dict["training"]["device"]
-        )
-    else:
-        raise ValueError(f"Unknown activation function: {activation_function}")
-
-
-class Sine(torch.nn.Module):
-    def __init(self):
-        super().__init__()
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        # See Siren paper sec. 3.2, final paragraph, and supplement Sec. 1.5 for discussion of factor 30
-        return torch.sin(30 * input)
-
-
-def sine_init(m):
-    with torch.no_grad():
-        if hasattr(m, "weight"):
-            num_input = m.weight.size(-1)
-            # In siren paper see supplement Sec. 1.5 for discussion of factor 30
-            m.weight.uniform_(-np.sqrt(6 / num_input) / 30, np.sqrt(6 / num_input) / 30)
-
-
-def first_layer_sine_init(m):
-    with torch.no_grad():
-        if hasattr(m, "weight"):
-            num_input = m.weight.size(-1)
-            m.weight.uniform_(-1 / num_input, 1 / num_input)
-
-
-@torch.jit.script
-def compute_projection_values(
-    num_points: int,
-    attenuation_values: torch.Tensor,
-    lengths: torch.Tensor,
-) -> torch.Tensor:
-    I0 = 1
-    # Compute the spacing between ray points
-    dx = lengths / (num_points)
-
-    # Compute the sum of mu * dx along each ray
-    attenuation_sum = torch.sum(attenuation_values * dx[:, None], dim=1)
-
-    return attenuation_sum
-
-class TruncatedLoss(nn.Module):
-    def __init__(self, k):
-        super(TruncatedLoss, self).__init__()
-        self.k = torch.tensor(k, dtype=torch.float32)
-    
-    def forward(self, a, b):
-        diff = torch.abs(a - b)
-        smooth_loss = self.k * torch.tanh((diff / self.k) ** 2)
-        loss = torch.mean(smooth_loss)
-        return loss
-
+from src.models import get_activation_function, Sine, sine_init, first_layer_sine_init, compute_projection_values
 
 class NeuralField(LightningModule):
 
@@ -107,36 +34,11 @@ class NeuralField(LightningModule):
         self.num_hidden_layers = args_dict["model"]["num_hidden_layers"]
         self.num_hidden_features = args_dict["model"]["num_hidden_features"]
         self.activation_function = args_dict["model"]["activation_function"]
-
-        config = {
-            "encoding_hashgrid": {
-                "otype": "HashGrid",
-                "n_levels": 16,
-                "n_features_per_level": 2,
-                "log2_hashmap_size": 19,
-                "base_resolution": 16,
-                "per_level_scale": 1.5
-            },
-            "encoding_spherical": {
-                "otype": "SphericalHarmonics",
-            	"degree": 4
-            },
-            "encoding_frequency": {
-            	"otype": "Frequency",
-            	"n_frequencies": 12              
-            },
-            "encoding_blob": {
-                "otype": "OneBlob", 
-                "n_bins": 16,
-            },
-        }
         
         # Initialising encoder
         if args_dict['model']['encoder'] != None:
             self.encoder = get_encoder(args_dict['model']['encoder'])
             num_input_features = self.encoder.output_dim
-            # self.encoder = tcnn.Encoding(n_input_dims=3, encoding_config=config[f"encoding_{args_dict['model']['encoder']}"])
-            # num_input_features = self.encoder.n_output_dims
         else:
             self.encoder = None
             num_input_features = 3  # x,y,z coordinate
@@ -315,12 +217,6 @@ class NeuralField(LightningModule):
             gt = torch.zeros(self.projection_shape, dtype=all_gt.dtype)
             gt[valid_rays] = all_gt
     
-            # for i in np.random.randint(0, self.projection_shape[0], 5):
-            #     self.logger.log_image(
-            #         key="val/projection",
-            #         images=[preds[i], gt[i], (gt[i] - preds[i])],
-            #         caption=[f"pred_{i}", f"gt_{i}", f"residual_{i}"],
-            #     )  # log projection images
             self.logger.log_image(
                 key="val/projection",
                 images=[preds[:,:,preds.shape[2]//2], gt[:,:,gt.shape[2]//2], (gt[:,:,gt.shape[2]//2] - preds[:,:,preds.shape[2]//2])],
@@ -329,9 +225,9 @@ class NeuralField(LightningModule):
 
         mgrid = torch.stack(
             torch.meshgrid(
-                torch.linspace(-1, 1, vol_shape[0]),
-                torch.linspace(-0.6526, 0.6526, vol_shape[1]-1),
-                torch.linspace(-1, 1, vol_shape[2]),
+                torch.linspace((0 if vol_shape[0] == 1 else -1), (0 if vol_shape[0] == 1 else 1), vol_shape[0]),
+                torch.linspace((0 if vol_shape[1] == 1 else -1), (0 if vol_shape[1] == 1 else 1), vol_shape[1]),
+                torch.linspace((0 if vol_shape[2] == 1 else -1), (0 if vol_shape[2] == 1 else 1), vol_shape[2]),
                 indexing="ij",
             ),
             dim=-1,
@@ -355,23 +251,25 @@ class NeuralField(LightningModule):
                 outputs[:, vol_shape[1] // 2, :],
                 vol[:, vol_shape[1] // 2, :],
                 (vol[:, vol_shape[1] // 2, :] - outputs[:, vol_shape[1] // 2, :]),
-                # outputs[vol_shape[0] // 2, :, :],
-                # vol[vol_shape[0] // 2, :, :],
-                # (vol[vol_shape[0] // 2, :, :] - outputs[vol_shape[0] // 2, :, :]),
-                # outputs[:, :, vol_shape[2] // 2],
-                # vol[:, :, vol_shape[2] // 2],
-                # (vol[:, :, vol_shape[2] // 2] - outputs[:, :, vol_shape[2] // 2]),
+                
+                outputs[vol_shape[0] // 2, :, :],
+                vol[vol_shape[0] // 2, :, :],
+                (vol[vol_shape[0] // 2, :, :] - outputs[vol_shape[0] // 2, :, :]),
+                
+                outputs[:, :, vol_shape[2] // 2],
+                vol[:, :, vol_shape[2] // 2],
+                (vol[:, :, vol_shape[2] // 2] - outputs[:, :, vol_shape[2] // 2]),
             ],
             caption=[
-                # "pred_xy",
-                # "gt_xy",
-                # "residual_xy",
-                # "pred_yz",
-                # "gt_yz",
-                # "residual_yz",
                 "pred_xz",
                 "gt_xz",
                 "residual_xz",
+                "pred_yz",
+                "gt_yz",
+                "residual_yz",
+                "pred_xy",
+                "gt_xy",
+                "residual_xy",
             ],
         )
 

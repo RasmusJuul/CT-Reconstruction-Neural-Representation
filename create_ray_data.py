@@ -38,8 +38,11 @@ def sample_points(start_points, end_points, num_points):
         return points.permute(1, 0, 2), step_size
 
 def interpolate_points(i,start_points,end_points,vol,num_points):
-    grid = (np.linspace(0, vol.shape[0]-1, vol.shape[0]),np.linspace(0, vol.shape[1]-1, vol.shape[1]),np.linspace(0, vol.shape[2]-1, vol.shape[2]))
-    
+    grid = (
+    np.linspace(0, vol.shape[0] - 1, vol.shape[0]),
+    np.linspace(0, vol.shape[1] - 1, vol.shape[1]),
+    np.linspace(0, vol.shape[2] - 1, vol.shape[2]),
+    )
     points,_ = sample_points(start_points,
                              end_points,
                              num_points)
@@ -149,6 +152,9 @@ if __name__=="__main__":
     src_vu_pix = np.stack([c.flatten() for c in src_vu_pix], axis=0)
     
     # angles = np.linspace(0,np.pi/1.5,4) #bugs
+    # angles = np.linspace(0,np.pi/2,2) #two angles 0 and 90
+    # angles = np.linspace(0,np.pi,5) #five angles 0, 45, 90, 135, 180
+    # angles = np.linspace(0,np.pi,16)
     angles = np.linspace(0,np.pi,50)
     
     #here we are assuming the phantom volume is 1 um voxel size.
@@ -225,12 +231,12 @@ if __name__=="__main__":
             
             positions = define_geometry(**projector_data)
         
-            detector_size = vol_shape_yxz[:2]
+            detector_size = vol.shape[:2]
             detector_pos = torch.tensor(positions[:, 3:6])
             detector_pixel_size = torch.tensor(positions[:, 6:])
             
             source_pos = torch.tensor(positions[:, :3])
-            object_shape = vol_shape_yxz
+            object_shape = torch.tensor(vol.shape)
             
             end_points = [None] * positions.shape[0]
             start_points = [None] * positions.shape[0]
@@ -243,6 +249,7 @@ if __name__=="__main__":
                     detector_size,
                     detector_pixel_size[i],
                     object_shape,
+                    beam_type="cone",
                 )
                 end_points[i] = geometry.end_points
                 start_points[i] = geometry.start_points

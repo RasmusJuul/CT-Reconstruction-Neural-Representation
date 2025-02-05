@@ -41,16 +41,11 @@ def main(args_dict):
                 f"{_PATH_DATA}/{args_dict['general']['data_path']}_projections.npy"
             ).shape
 
-    if args_dict["training"]["slices"]:
-        model = NeuralGAN(
-            args_dict,
-            projection_shape=projection_shape,
-        )
-    else:
-        model = RayGAN(
-            args_dict,
-            projection_shape=projection_shape,
-        )
+
+    model = RayGAN(
+        args_dict,
+        projection_shape=projection_shape,
+    )
 
     if (
         args_dict["general"]["weights_only"]
@@ -69,14 +64,14 @@ def main(args_dict):
     
     wandb_logger = WandbLogger(
         project="Renner",
-        name=f"{args_dict['general']['experiment_name']}_{args_dict['model']['encoder']}_{args_dict['model']['activation_function']}_regularization-weight-{args_dict['training']['regularization_weight']}_noise-level-{args_dict['training']['noise_level']}",
+        name=f"{args_dict['general']['experiment_name']}_projection_shape_{projection_shape}",
     )
     wandb_logger.watch(model, log="all", log_graph=False)
 
     checkpoint_callback = ModelCheckpoint(
-        dirpath=f"{_PATH_MODELS}/{args_dict['general']['experiment_name']}_{args_dict['model']['encoder']}_{args_dict['model']['activation_function']}_regularization-weight-{args_dict['training']['regularization_weight']}_noise-level-{args_dict['training']['noise_level']}-{time}",
+        dirpath=f"{_PATH_MODELS}/{args_dict['general']['experiment_name']}_projection_shape_{projection_shape}-{time}",
         filename="{epoch}",
-        monitor="train/loss",
+        monitor="val/loss",
         mode="min",
         save_top_k=1,
         save_last=True,
@@ -185,10 +180,23 @@ if __name__ == "__main__":
         help="Whether or not to add noise to the point",
     )
     parser_training.add_argument(
-        "--regularization-weight",
+        "--smoothness-weight",
         type=float,
         default=1e-1,
-        help="weight used to scale the regularization loss of diffenrence between adjacent points on ray",
+        help="weight used to scale the smoothness loss, the difference between adjacent points on ray",
+    )
+    parser_training.add_argument(
+        "--consistency-weight",
+        type=float,
+        default=5e-2,
+        help="weight used to scale the consistency loss, the difference between outputs of the network, with very slighty changed points",
+    )
+    
+    parser_training.add_argument(
+        "--fml-weight",
+        type=float,
+        default=1e-3,
+        help="weight for feature matching loss, a loss that takes the features from the discriminator and compares features from the real samples and generated samples",
     )
     parser_training.add_argument(
         "--adversarial-weight",
@@ -203,9 +211,16 @@ if __name__ == "__main__":
         help="constant which will be multiplied by gaussian noise with 0 mean and std of the mean value of the projections",
     )
     parser_training.add_argument(
-        "--slices",
-        action="store_true",
-        help="Whether or not use adversarial loss on slices",
+        "--midpoint",
+        type=float,
+        default=0.3,
+        help="Midpoint (sigmoid) for adversarial transistion weight",
+    )
+    parser_training.add_argument(
+        "--sharpness",
+        type=float,
+        default=0.1,
+        help="Sharpness of sigmoid for adversarial transistion weight",
     )
     
 
@@ -263,10 +278,13 @@ if __name__ == "__main__":
             "num_workers": args.num_workers,
             "num_points": args.num_points,
             "noisy_points": args.noisy_points,
-            "regularization_weight": args.regularization_weight,
+            "smoothness_weight": args.smoothness_weight,
+            "consistency_weight":args.consistency_weight,
             "adversarial_weight": args.adversarial_weight,
+            "fml_weight": args.fml_weight,
+            "midpoint": args.midpoint,
+            "sharpness": args.sharpness,
             "noise_level": args.noise_level,
-            "slices": args.slices,
         },
         "model": {
             "num_hidden_layers": args.num_hidden_layers,
