@@ -381,7 +381,6 @@ class CTpointsWithRays(torch.utils.data.Dataset):
     def __init__(self, args_dict, noisy_points=False):
 
         self.args = args_dict
-        self.slices = self.args['training']['slices']
         data_path = f"{_PATH_DATA}/{self.args['general']['data_path']}"
         self.file_path = data_path
         self.noisy = noisy_points
@@ -460,11 +459,7 @@ class CTpointsWithRays(torch.utils.data.Dataset):
             self.real_end_points = None
             self.real_rays = None
             self.loaded_rays_into_ram = False
-
         
-        
-        self.dataset = None
-        self.counter_for_slices = 0
 
     def sample_points(self, start_points, end_points, num_points):
         """

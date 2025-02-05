@@ -21,7 +21,7 @@ import wandb
 
 from src import _PATH_DATA, _PATH_MODELS, _PROJECT_ROOT
 from src.dataloaders import CTRayDataModule
-from src.models.nfraygan import RayGAN, NeuralGAN
+from src.models.nfraygan import RayGAN
 from src import get_device
 
 torch._dynamo.config.suppress_errors = True
@@ -64,12 +64,12 @@ def main(args_dict):
     
     wandb_logger = WandbLogger(
         project="Renner",
-        name=f"{args_dict['general']['experiment_name']}_projection_shape_{projection_shape}",
+        name=f"{args_dict['general']['experiment_name']}_projections_{projection_shape[0]}",
     )
     wandb_logger.watch(model, log="all", log_graph=False)
 
     checkpoint_callback = ModelCheckpoint(
-        dirpath=f"{_PATH_MODELS}/{args_dict['general']['experiment_name']}_projection_shape_{projection_shape}-{time}",
+        dirpath=f"{_PATH_MODELS}/{args_dict['general']['experiment_name']}_projections_{projection_shape[0]}-{time}",
         filename="{epoch}",
         monitor="val/loss",
         mode="min",

@@ -31,10 +31,6 @@ MYTMP=${__LSF_JOB_TMPDIR__}
 
 # TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name NeuralField_fiber9 --data-path synthetic_fibers/test_fiber_16_projections_9 --no-latent --encoder hashgrid --activation-function relu --model-lr 1e-4 --num-epochs 200 --batch-size 2500 --num-workers 16 --smoothness-weight 5e-3
 
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_raygan.py --experiment-name raygan_fiber9 --data-path synthetic_fibers/test_fiber_16_projections_9 --activation-function sine --model-lr 1e-4 --d-lr 1e-3 --num-epochs 150 --batch-size 5000 --num-workers 16 --smoothness-weight 5e-3 --adversarial-weight 1e-1 --ray-data-path $MYTMP/combined_interpolated_points_16.hdf5 --checkpoint-path NeuralField_fiber9_None_sine_regularization-weight-0.005_noise-level-None_latent-size-256-2025-01-27-2009/last.ckpt --weights-only
-
-# TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_model.py --experiment-name NeuralField_fiber9 --data-path synthetic_fibers/test_fiber_16_projections_9 --no-latent --activation-function sine --model-lr 1e-4 --num-epochs 200 --batch-size 2500 --num-workers 16 --smoothness-weight 5e-3 --num-points 256
-
 #---------------BugNIST-SL------------------
 
 # cp data/bugnist_256/SL_combined_interpolated_points_4.hdf5 $MYTMP
@@ -48,9 +44,9 @@ MYTMP=${__LSF_JOB_TMPDIR__}
 
 # TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 volume_fit.py --experiment-name NeuralField_Pancreas0 --data-path Task07_Pancreas/fbp_0.tif --activation-function sine --model-lr 1e-4 --num-epochs 5 --batch-size 10 --num-workers 4 --imagefit-mode
 
-cp data/Task07_Pancreas/combined_interpolated_points_5.hdf5 $MYTMP
+cp data/Task07_Pancreas/combined_interpolated_points_16.hdf5 $MYTMP
 
-TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_raygan.py --experiment-name raygan_Pancreas0 --data-path Task07_Pancreas/test_5proj_0 --activation-function relu --num-points 512 --model-lr 1e-3 --d-lr 1e-4 --num-epochs 500 --batch-size 1200 --num-workers 8 --smoothness-weight 5e-4 --encoder hashgrid --adversarial-weight 1e-3 --ray-data-path $MYTMP/combined_interpolated_points_5.hdf5 --midpoint 0.15
+TORCH_USE_CUDA_DSA=1 CUDA_LAUNCH_BLOCKING=1 python3 train_raygan.py --experiment-name raygan_Pancreas0 --data-path Task07_Pancreas/test_16proj_0 --activation-function relu --num-points 512 --model-lr 1e-3 --d-lr 5e-5 --num-epochs 1000 --batch-size 3800 --num-workers 8 --smoothness-weight 5e-4 --encoder hashgrid --adversarial-weight 1e-3 --ray-data-path $MYTMP/combined_interpolated_points_16.hdf5 --midpoint 0.15 --checkpoint-path "raygan_Pancreas0_projection_shape_(16, 512, 1)-2025-02-05-1917/last.ckpt"
 
 #---------------Citrus------------------
 
