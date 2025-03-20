@@ -18,3 +18,5 @@ submit.sh
 notebooks/interpolations_images/
 .venv/
 tiny-cuda-nn/
+notebooks/
+meta_solver.py

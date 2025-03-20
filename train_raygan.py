@@ -21,15 +21,15 @@ import wandb
 
 from src import _PATH_DATA, _PATH_MODELS, _PROJECT_ROOT
 from src.dataloaders import CTRayDataModule
-from src.models.nfraygan import RayGAN
+from src.networks.nfraygan import RayGAN
 from src import get_device
 
 torch._dynamo.config.suppress_errors = True
 
 
 def main(args_dict):
-    if torch.cuda.get_device_properties(0).total_memory / 2**30 > 60:
-        args_dict["training"]["batch_size"] *= 2
+    # if torch.cuda.get_device_properties(0).total_memory / 2**30 > 60:
+    #     args_dict["training"]["batch_size"] *= 2
         
     seed_everything(args_dict["general"]["seed"], workers=True)
     torch.set_float32_matmul_precision("medium")
@@ -71,7 +71,7 @@ def main(args_dict):
     checkpoint_callback = ModelCheckpoint(
         dirpath=f"{_PATH_MODELS}/{args_dict['general']['experiment_name']}_projections_{projection_shape[0]}-{time}",
         filename="{epoch}",
-        monitor="val/loss",
+        monitor="val/loss_reconstruction",
         mode="min",
         save_top_k=1,
         save_last=True,
@@ -129,6 +129,19 @@ if __name__ == "__main__":
         help="Path to ray data",
     )
     parser_general.add_argument(
+        "--extra-positions-path",
+        type=str,
+        default=None,
+        help="Path to extra positions for generating rays with no corresponding detector values",
+    )
+    parser_general.add_argument(
+        "--extra-ray-data-path",
+        type=str,
+        default=None,
+        help="Path to extra ray data",
+    )
+    
+    parser_general.add_argument(
         "--checkpoint-path",
         type=str,
         default=None,
@@ -152,6 +165,9 @@ if __name__ == "__main__":
     )
     parser_training.add_argument(
         "--batch-size", type=int, default=1000, help="Number of rays in each mini-batch"
+    )
+    parser_training.add_argument(
+        "--extra-batch-size", type=int, default=1000, help="Number of extra rays with no detector values in each mini-batch"
     )
     parser_training.add_argument(
         "--num-workers",
@@ -205,6 +221,13 @@ if __name__ == "__main__":
         help="weight used to scale the adversarial loss",
     )
     parser_training.add_argument(
+        "--curvature-weight",
+        type=float,
+        default=1e-5,
+        help="weight used to scale the curvature loss (second derivative)",
+    )
+    
+    parser_training.add_argument(
         "--noise-level",
         type=float,
         default=None,
@@ -254,6 +277,45 @@ if __name__ == "__main__":
         choices=["relu", "leaky_relu", "tanh", "sigmoid", "elu", "none", "sine"],
         help="Activation function in the MLP model",
     )
+    parser_model.add_argument(
+        "--multiscale",
+        action="store_true",
+        help="Whether or not to use multiscale in discriminator",
+    )
+    parser_model.add_argument(
+        "--dilated",
+        action="store_true",
+        help="Whether or not to use dilation in discriminator",
+    )
+    parser_model.add_argument(
+        "--fft-branch",
+        action="store_true",
+        help="Whether or not to add a fast fourier transform branch to the discriminator",
+    )
+    parser_model.add_argument(
+        "--segment-aggregation",
+        action="store_true",
+        help="Whether or not to add a segmented ray aggregation branch to the discriminator",
+    )
+    parser_model.add_argument(
+        "--transformer",
+        action="store_true",
+        help="Whether or not to use a transformer after convolutions in the discriminator",
+    )
+    parser_model.add_argument(
+        "--transformer-nhead",
+        type=int,
+        default=4,
+        help="Number of layers in the MLP model",
+    )
+    parser_model.add_argument(
+        "--transformer-num-layers",
+        type=int,
+        default=1,
+        help="Number of hidden units in the MLP model",
+    )
+    
+    
 
     args = parser.parse_args()
 
@@ -263,7 +325,9 @@ if __name__ == "__main__":
         "general": {
             "experiment_name": args.experiment_name,
             "data_path": args.data_path,
+            'extra_positions_path': args.extra_positions_path,
             "ray_data_path": args.ray_data_path,
+            'extra_ray_data_path': args.extra_ray_data_path,
             "seed": args.seed,
             "checkpoint_path": args.checkpoint_path,
             "weights_only": args.weights_only,
@@ -281,16 +345,26 @@ if __name__ == "__main__":
             "smoothness_weight": args.smoothness_weight,
             "consistency_weight":args.consistency_weight,
             "adversarial_weight": args.adversarial_weight,
+            "curvature_weight": args.curvature_weight,
             "fml_weight": args.fml_weight,
             "midpoint": args.midpoint,
             "sharpness": args.sharpness,
             "noise_level": args.noise_level,
+            "extra_batch_size":args.extra_batch_size,
+
         },
         "model": {
             "num_hidden_layers": args.num_hidden_layers,
             "num_hidden_features": args.num_hidden_features,
             "encoder": args.encoder,
             "activation_function": args.activation_function,
+            "multiscale": args.multiscale,
+            "dilated": args.dilated,
+            "fft_branch": args.fft_branch,
+            "segment_aggregation": args.segment_aggregation,
+            "transformer": args.transformer,
+            "transformer_nhead": args.transformer_nhead,
+            "transformer_num_layers": args.transformer_num_layers,
         },
     }
     main(args_dict)

@@ -146,8 +146,8 @@ def define_geometry(src_vu_pix: NDArray, vol_z0_pix: float, vol_shape_yxz: Seque
     
 if __name__=="__main__":
     # sourec points in multiple of pixel unit:
-    sources_v = np.linspace(-5, 5, 4) * 2e1
-    sources_u = np.linspace(-5, 5, 4) * 2e1
+    sources_v = np.linspace(-5, 5, 2) * 1e1
+    sources_u = np.linspace(-5, 5, 2) * 1e1
     src_vu_pix = np.meshgrid(sources_v, sources_u, indexing="ij")
     src_vu_pix = np.stack([c.flatten() for c in src_vu_pix], axis=0)
     
@@ -155,12 +155,12 @@ if __name__=="__main__":
     # angles = np.linspace(0,np.pi/2,2) #two angles 0 and 90
     # angles = np.linspace(0,np.pi,5) #five angles 0, 45, 90, 135, 180
     # angles = np.linspace(0,np.pi,16)
-    angles = np.linspace(0,np.pi,50)
+    angles = np.linspace(0,np.pi,200)
     
     #here we are assuming the phantom volume is 1 um voxel size.
-    # detector_distance = 150e4 #deafult 1, if voxel size = 1um, then 1m = 1e6. synthetic fibers
+    detector_distance = 150e4 #deafult 1, if voxel size = 1um, then 1m = 1e6. synthetic fibers
     # detector_distance = 160e4 #soldier larva
-    detector_distance = 150e4 #Pancreas
+    # detector_distance = 150e4 #Pancreas
     sample_source_distance = 3e4 #default 1500, if voxel size = 1um, 3cm = 3e4
     pixel_size_x = 55.0 #default 1, 55um pixel size
     pixel_size_y = 55.0 #default 1, 55um pixel size
@@ -168,15 +168,15 @@ if __name__=="__main__":
     
 
     # Define volume shape and rotation direction
-    # vol_shape_yxz = np.array([256,256,256]) #Synthetic fibers
-    # direction = 1
+    # vol_shape_yxz = np.array([1,256,256]) #Synthetic fibers
+    # direction = 2
     # num_points = 256
     
     # vol_shape_yxz = np.array([160,160,192]) #SL
     # direction = 3
     # num_points = 256
     
-    vol_shape_yxz = np.array([1,512,512]) #Pancreas
+    vol_shape_yxz = np.array([100,512,512]) #Pancreas
     direction = 2
     num_points = 512
 
@@ -185,7 +185,8 @@ if __name__=="__main__":
 
     data_upload_count = 0
     
-    hdf5_path = f"{_PATH_DATA}/Task07_Pancreas/combined_interpolated_points_50.hdf5"
+    hdf5_path = f"{_PATH_DATA}/Task07_Pancreas/full_combined_interpolated_points_200.hdf5"
+    # hdf5_path = f"{_PATH_DATA}/synthetic_fibers/combined_interpolated_points_16.hdf5"
     # Create HDF5 file
     with h5py.File(hdf5_path, 'w') as hdf5_file:
         # Create a dataset in the file
@@ -210,11 +211,12 @@ if __name__=="__main__":
         # for k in tqdm(range(num_volumes), desc="interpolating points"):
         #     # Synthetic fibers
         #     with h5py.File(f"{_PATH_DATA}/synthetic_fibers/train.hdf5", 'r') as f:
-        #         vol = f["volumes"][k,:,:,:].transpose(2,1,0)
+        #         vol = f["volumes"][k,:,:,125:126].transpose(1,2,0)
         for k in tqdm(range(num_volumes), desc="interpolating points"):
             with h5py.File(f"{_PATH_DATA}/Task07_Pancreas/train.hdf5", 'r') as f:
                 dataset = f["volumes"]
-                vol = dataset[k,:,:,:].transpose(1,2,0)[:,49:50,:]
+                # vol = dataset[k,:,:,:].transpose(1,2,0)[:,49:50,:]
+                vol = dataset[k,:,:,:].transpose(1,2,0)[:,:,:]
             df_list = []
                 
             
@@ -271,7 +273,7 @@ if __name__=="__main__":
             
             
             df_list.append(
-                Parallel(n_jobs=len(angles))(
+                Parallel(n_jobs=24)(
                     delayed(interpolate_points)(i, start_points[idxs[i]:idxs[i+1]], end_points[idxs[i]:idxs[i+1]], vol, num_points)
                     for i in range(len(angles))
                     )

@@ -21,8 +21,8 @@ import wandb
 
 from src import _PATH_DATA, _PATH_MODELS, _PROJECT_ROOT
 from src.dataloaders import CTDataModule, ImagefitDataModule
-from src.models.mlp import NeuralField
-from src.models.nfraygan import RayGAN
+from src.networks.mlp import NeuralField
+from src.networks.nfraygan import RayGAN
 from src import get_device
 
 torch._dynamo.config.suppress_errors = True
