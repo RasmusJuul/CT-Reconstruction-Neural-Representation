@@ -167,7 +167,8 @@ class Discriminator(nn.Module):
             nn.Linear(128, 64),
             nn.BatchNorm1d(64),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Linear(64, 1)
+            nn.Linear(64, 1),
+            torch.nn.Sigmoid()
         )
     
     def process_ray(self, x):

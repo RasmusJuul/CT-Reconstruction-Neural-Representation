@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
 import math
 import numpy as np
 from pytorch_lightning import LightningModule
@@ -65,6 +64,11 @@ class RayGAN(LightningModule):
                         get_activation_function(self.activation_function, args_dict),
                     )
                 )
+
+        self.layers = nn.ModuleList(
+            [nn.Linear(num_input_features, self.num_hidden_features)] + [nn.Linear(self.num_hidden_features, self.num_hidden_features) if i not in skips 
+                else nn.Linear(hidden_dim + self.in_dim, hidden_dim) for i in range(1, num_layers-1, 1)])
+        self.layers.append(nn.Linear(hidden_dim, out_dim))
 
         self.mlp_first_half = torch.nn.Sequential(
             torch.nn.Linear(num_input_features, self.num_hidden_features),
@@ -180,6 +184,9 @@ class RayGAN(LightningModule):
             out = out.view(*pts_shape[:-1], -1)
 
         return out
+
+    def outer_loop(self):
+        
 
     def training_step(self, batch, batch_idx):
         # Unpack batch -- note that valid_mask is True for measured rays and False for extra rays.
