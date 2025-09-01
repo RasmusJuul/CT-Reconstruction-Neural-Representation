@@ -22,8 +22,6 @@ import wandb
 from src import _PATH_DATA, _PATH_MODELS, _PROJECT_ROOT
 from src.dataloaders import CTDataModule, ImagefitDataModule
 from src.networks.mlp import NeuralField
-from src.networks.nfraygan import RayGAN
-from src.networks.autodecoder import AutoDecoder, AutoDecoder_adversarial
 from src import get_device
 
 torch._dynamo.config.suppress_errors = True
@@ -206,7 +204,7 @@ if __name__ == "__main__":
     parser_model.add_argument(
         "--num-hidden-features",
         type=int,
-        default=256,
+        default=128,
         help="Number of hidden units in the MLP model",
     )
     parser_model.add_argument(
@@ -251,7 +249,6 @@ if __name__ == "__main__":
             "num_points": args.num_points,
             "imagefit_mode": args.imagefit_mode,
             "noisy_points": args.noisy_points,
-            "regularization_weight": args.regularization_weight,
             "noise_level": args.noise_level,
         },
         "model": {
@@ -262,5 +259,13 @@ if __name__ == "__main__":
             "num_freq_bands": args.num_freq_bands,
             "activation_function": args.activation_function,
         },
+        "losses":{
+            "tv_ray": {"enabled": True, "weight": 5e-3, "anneal": False, "anneal_frac": 0.5},
+            "lap_ray": {"enabled": True, "weight": 1e-4, "anneal": False},
+            "grad_3d": {"enabled": True, "weight": 5e-3, "num_points": args.num_points, "anneal": True, "anneal_frac": 0.3},
+            "grad_dir": {"enabled": False, "weight": 1e-5, "num_points": args.num_points, "anneal": False},
+            "spec_ray": {"enabled": False, "weight": 1e-4, "cutoff": 0.25, "anneal": True, "anneal_frac": 0.5}
+        },
     }
+
     main(args_dict)

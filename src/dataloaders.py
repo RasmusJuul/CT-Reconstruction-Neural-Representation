@@ -20,7 +20,8 @@ from src import _PATH_DATA
 def collate_fn(batch):
     points = batch[0]
     targets = batch[1]
-    return points, targets
+    ray_dir = batch[2]
+    return points, targets, ray_dir
 
 
 def collate_fn_imagefit(batch):
@@ -197,6 +198,11 @@ class CTpoints(torch.utils.data.Dataset):
             with h5py.File(f"{_PATH_DATA}/Task07_Pancreas/train.hdf5", 'r') as f:
                 self.vol = torch.from_numpy(f["volumes"][100+int(data_path.split("_")[-1]),:,:,:]).permute(1,2,0)[:,49:50,:]
                 # self.vol = torch.from_numpy(f["volumes"][100+int(data_path.split("_")[-1]),:,:,:]).permute(1,2,0)[:,:,:]
+        elif "plenoptic" in data_path:
+            vol = torch.tensor(tifffile.imread(f"{data_path}.tif"))
+            vol -= vol.min()
+            vol = vol / vol.max()
+            self.vol = vol
         else:
             vol = torch.tensor(tifffile.imread(f"{data_path}.tif"))
             vol -= vol.min()
@@ -235,6 +241,13 @@ class CTpoints(torch.utils.data.Dataset):
         self.detector_pixel_coordinates = torch.cat(self.detector_pixel_coordinates)
 
         self.noisy = noisy_points
+        
+        # === Auto-compute max_steps ===
+        dataset_size = len(self)  # total rays
+        batch_size = self.args["training"]["batch_size"]
+        num_epochs = self.args["training"]["num_epochs"]
+
+        self.max_steps = num_epochs * math.ceil(dataset_size / batch_size)
 
     def sample_points(self, start_points, end_points, num_points):
         """
@@ -259,23 +272,31 @@ class CTpoints(torch.utils.data.Dataset):
 
     def __len__(self):
         return self.start_points.shape[0]
-
+        
     def __getitems__(self, idx):
         end_points = self.end_points[idx]
         start_points = self.start_points[idx]
+    
+        # Ray direction (normalize to unit length)
+        ray_dirs = end_points - start_points
+        ray_dirs = ray_dirs / torch.norm(ray_dirs, dim=-1, keepdim=True).clamp_min(1e-8)
+    
         points, step_size = self.sample_points(
             start_points, end_points, self.args["training"]["num_points"]
         )
         targets = torch.tensor(self.projections.flatten()[self.valid_rays][idx])
-
+    
         if self.noisy:
             noise = (torch.rand(points.shape) - 0.5) * 0.5
             points = points + (noise * step_size[:, None, :])
             points = torch.clamp(points, -1.0, 1.0)
-
+    
         points = points.contiguous().to(dtype=torch.float)
         targets = targets.contiguous().to(dtype=torch.float)
-        return points, targets
+        ray_dirs = ray_dirs.contiguous().to(dtype=torch.float)
+
+        return points, targets, ray_dirs
+
 
 
 class CTDataModule(pl.LightningDataModule):

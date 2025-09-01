@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import math
 import numpy as np
 
@@ -61,3 +62,36 @@ def compute_projection_values(
     attenuation_sum = torch.sum(attenuation_values * dx[:, None], dim=1)
 
     return attenuation_sum
+
+
+class SaturatingGaussianMixtureLoss(nn.Module):
+    def __init__(self, target_means, variances, max_loss=1.0):
+        super().__init__()
+        self.register_buffer('means', torch.tensor(target_means, dtype=torch.float32))  # (num_targets, dim)
+        self.register_buffer('variances', torch.tensor(variances, dtype=torch.float32))  # (num_targets,)
+        self.max_loss = max_loss
+
+    def forward(self, x):
+        if x.dim() == 1:
+            x = x.unsqueeze(1)  # Ensure shape is (batch_size, dim)
+
+        means = self.means.to(x.device)  # (num_targets, dim)
+        variances = self.variances.to(x.device)  # (num_targets,)
+        x = x.unsqueeze(1)  # (batch_size, 1, dim)
+        means = means.unsqueeze(0)  # (1, num_targets, dim)
+        variances = variances.unsqueeze(0)  # (1, num_targets)
+
+        sq_dist = ((x - means) ** 2).sum(dim=2)  # (batch_size, num_targets)
+        min_sq_dist = sq_dist.min(dim=1).values  # (batch_size,)
+        loss = self.max_loss * (1 - torch.exp(-min_sq_dist / (2 * variances.min())))
+        return loss.mean()
+
+
+
+
+
+
+
+
+
+
